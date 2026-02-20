@@ -68,7 +68,14 @@ defmodule Xwa.Graph.Node do
     human_validated: false,
     contested: false,
     public: true,
-    encrypted: false
+    encrypted: false,
+    # Multi-graph tenancy
+    # graph_id scopes this node to a single Postgres Graph record.
+    # visibility: "system"  = AI-extracted, visible to all graph members;
+    #             "private" = only visible to created_by user;
+    #             "shared"  = visible to members listed in shared_with (all if empty)
+    graph_id: nil,
+    visibility: "system"
   ]
 
   @type t :: %__MODULE__{
@@ -93,7 +100,9 @@ defmodule Xwa.Graph.Node do
           created_by: String.t() | nil,
           validated_by: [String.t()],
           shared_with: [String.t()],
-          notes: String.t() | nil
+          notes: String.t() | nil,
+          graph_id: String.t() | nil,
+          visibility: String.t()
         }
 
   @doc """
@@ -127,7 +136,9 @@ defmodule Xwa.Graph.Node do
       created_by: Map.get(attrs, :created_by),
       validated_by: Map.get(attrs, :validated_by, []),
       shared_with: Map.get(attrs, :shared_with, []),
-      notes: Map.get(attrs, :notes)
+      notes: Map.get(attrs, :notes),
+      graph_id: Map.get(attrs, :graph_id),
+      visibility: Map.get(attrs, :visibility, "system")
     }
 
     case validate(node) do
@@ -210,7 +221,9 @@ defmodule Xwa.Graph.Node do
       created_by: props["created_by"],
       validated_by: props["validated_by"] || [],
       shared_with: props["shared_with"] || [],
-      notes: props["notes"]
+      notes: props["notes"],
+      graph_id: props["graph_id"],
+      visibility: Map.get(props, "visibility", "system")
     }
   end
 

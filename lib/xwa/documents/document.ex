@@ -49,6 +49,7 @@ defmodule Xwa.Documents.Document do
     # Audit
     field :created_by, :binary_id
 
+    belongs_to :graph, Xwa.Graphs.Graph
     has_one :content, Xwa.Documents.DocumentContent, foreign_key: :document_id
 
     timestamps(type: :utc_datetime)
@@ -78,7 +79,8 @@ defmodule Xwa.Documents.Document do
       :ingestion_status,
       :ingestion_error,
       :encryption_tier,
-      :created_by
+      :created_by,
+      :graph_id
     ])
     |> validate_required([:title, :storage_backend])
     |> validate_inclusion(:storage_backend, @storage_backends)

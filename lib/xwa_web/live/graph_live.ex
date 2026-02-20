@@ -1,15 +1,15 @@
 defmodule XwaWeb.GraphLive do
   use XwaWeb, :live_view
 
-  alias Xwa.Graph
-  alias Xwa.Graph.{Nodes, Edges, Edge}
+  alias Xwa.Graph.{Nodes, Edges}
   alias Xwa.Documents
 
   @impl true
   def mount(_params, _session, socket) do
     user_id = socket.assigns.current_scope.user.id
-    {:ok, nodes} = Nodes.list()
-    {:ok, all_edges} = all_edges(user_id)
+    graph_id = socket.assigns.current_scope.graph_id
+    {:ok, nodes} = Nodes.list(graph_id, user_id: user_id)
+    {:ok, all_edges} = all_edges(graph_id, user_id)
 
     socket =
       socket
@@ -174,24 +174,8 @@ defmodule XwaWeb.GraphLive do
   # Private
   # ---------------------------------------------------------------------------
 
-  defp all_edges(user_id) do
-    cypher = "MATCH ()-[r:RELATES]->() RETURN r"
-
-    case Graph.query(cypher) do
-      {:ok, rows} ->
-        edges =
-          rows
-          |> Enum.map(fn
-            %{"r" => bolt_rel} -> Edge.from_bolt(bolt_rel)
-            row -> Edge.from_bolt(row)
-          end)
-          |> Enum.reject(fn e -> user_id in (e.hidden_by || []) end)
-
-        {:ok, edges}
-
-      {:error, _reason} ->
-        {:ok, []}
-    end
+  defp all_edges(graph_id, user_id) do
+    Edges.list(graph_id, user_id)
   end
 
   defp apply_filters(socket, layer, type, search) do

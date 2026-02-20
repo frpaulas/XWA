@@ -9,13 +9,17 @@ defmodule Xwa.Ingestion.ClaimExtractor do
 
   ## Usage
 
-      {:ok, nodes} = ClaimExtractor.extract(text, %{
-        document_id: doc.id,
-        corpus_layer: doc.corpus_layer,
-        source_type:  doc.source_type,
+      {:ok, nodes, usage} = ClaimExtractor.extract(text, %{
+        document_id:   doc.id,
+        graph_id:      graph_id,
+        corpus_layer:  doc.corpus_layer,
+        source_type:   doc.source_type,
         document_date: doc.document_date,
-        created_by:   user_id
+        created_by:    user_id
       })
+
+  `usage` is a map with keys: `:input_tokens`, `:output_tokens`,
+  `:finish_reason`, `:latency_ms`, `:model`.
   """
 
   alias Xwa.Graph.Node
@@ -30,21 +34,14 @@ defmodule Xwa.Ingestion.ClaimExtractor do
   @doc """
   Extracts claims from `text` using the Claude API.
 
-  `context` map keys:
-  - `:document_id`   — UUID of the source document (required)
-  - `:corpus_layer`  — "self_description" | "internal_record" | "external_context"
-  - `:source_type`   — "aspirational" | "operational" | "external"
-  - `:document_date` — Date struct or ISO 8601 string; falls back to "unknown"
-  - `:created_by`    — UUID of the user who uploaded the document
-
-  Returns `{:ok, [%Node{}]}` or `{:error, reason}`.
+  Returns `{:ok, [%Node{}], usage_map}` or `{:error, reason}`.
   """
-  @spec extract(String.t(), map()) :: {:ok, [Node.t()]} | {:error, term()}
+  @spec extract(String.t(), map()) :: {:ok, [Node.t()], map()} | {:error, term()}
   def extract(text, context) when is_binary(text) and is_map(context) do
     with {:ok, prompt} <- build_prompt(text, context),
-         {:ok, raw_json} <- call_claude(prompt),
+         {:ok, raw_json, usage} <- call_claude(prompt),
          {:ok, nodes} <- parse_response(raw_json, context) do
-      {:ok, nodes}
+      {:ok, nodes, usage}
     end
   end
 
@@ -89,19 +86,37 @@ defmodule Xwa.Ingestion.ClaimExtractor do
         messages: [%{role: "user", content: prompt}]
       }
 
-      case Req.post("https://api.anthropic.com/v1/messages",
-             json: body,
-             headers: [
-               {"x-api-key", api_key},
-               {"anthropic-version", "2023-06-01"}
-             ],
-             receive_timeout: 120_000
-           ) do
-        {:ok, %{status: 200, body: body}} ->
-          extract_text_from_response(body)
+      t0 = System.monotonic_time(:millisecond)
 
-        {:ok, %{status: status, body: body}} ->
-          {:error, {:api_error, status, body}}
+      result =
+        Req.post("https://api.anthropic.com/v1/messages",
+          json: body,
+          headers: [
+            {"x-api-key", api_key},
+            {"anthropic-version", "2023-06-01"}
+          ],
+          receive_timeout: 120_000
+        )
+
+      latency_ms = System.monotonic_time(:millisecond) - t0
+
+      case result do
+        {:ok, %{status: 200, body: resp_body}} ->
+          usage = %{
+            input_tokens: get_in(resp_body, ["usage", "input_tokens"]),
+            output_tokens: get_in(resp_body, ["usage", "output_tokens"]),
+            finish_reason: resp_body["stop_reason"],
+            latency_ms: latency_ms,
+            model: resp_body["model"] || model()
+          }
+
+          case extract_text_from_response(resp_body) do
+            {:ok, text} -> {:ok, text, usage}
+            error -> error
+          end
+
+        {:ok, %{status: status, body: resp_body}} ->
+          {:error, {:api_error, status, resp_body}}
 
         {:error, reason} ->
           {:error, {:http_error, reason}}
@@ -133,7 +148,6 @@ defmodule Xwa.Ingestion.ClaimExtractor do
     end
   end
 
-  # Claude sometimes wraps JSON in a ```json ... ``` fence — strip it.
   defp extract_json(text) do
     case Regex.run(~r/```(?:json)?\s*([\s\S]*?)```/m, text, capture: :all_but_first) do
       [json] -> String.trim(json)
@@ -154,7 +168,9 @@ defmodule Xwa.Ingestion.ClaimExtractor do
       created_by: Map.get(context, :created_by),
       asserted_at: parse_date(claim["asserted_at"]),
       ai_inferred: true,
-      human_validated: false
+      human_validated: false,
+      graph_id: Map.get(context, :graph_id),
+      visibility: "system"
     }
   end
 
@@ -168,16 +184,13 @@ defmodule Xwa.Ingestion.ClaimExtractor do
   end
 
   defp prompt_template do
-    # Load from priv/prompts at runtime so it can be updated without recompile.
-    path =
-      Application.app_dir(:xwa, "priv/prompts/claim_extraction.md")
+    path = Application.app_dir(:xwa, "priv/prompts/claim_extraction.md")
 
     case File.read(path) do
       {:ok, content} ->
         content
 
       {:error, _} ->
-        # Fallback: read relative to project root in dev
         File.read!(Path.join([:code.priv_dir(:xwa), "../..", "prompts", "claim_extraction.md"]))
     end
   end

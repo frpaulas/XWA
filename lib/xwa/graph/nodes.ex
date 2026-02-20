@@ -6,19 +6,19 @@ defmodule Xwa.Graph.Nodes do
   This module owns the Cypher queries and maps results to and from
   `Xwa.Graph.Node` structs.
 
+  ## Graph tenancy
+
+  Every node carries a `graph_id` property that scopes it to a single
+  Postgres Graph record. All list/query functions that accept a `graph_id`
+  filter on it. Functions without a `graph_id` argument operate across all
+  graphs and should only be called from internal pipeline code.
+
   ## Node identity
 
   Nodes are identified by the `id` property (a UUID string), not
   Memgraph's internal element id. All lookups use `id` so that the
   graph can be backed up, restored, or migrated without losing
   referential integrity.
-
-  ## Embeddings
-
-  The `embedding` field is populated separately by the AI pipeline.
-  Use `set_embedding/2` once the vector has been computed. A vector
-  index over `:Claim(embedding)` should be created via
-  `Xwa.Graph.Setup.run/0` before semantic queries are issued.
   """
 
   alias Xwa.Graph
@@ -29,12 +29,30 @@ defmodule Xwa.Graph.Nodes do
   # ---------------------------------------------------------------------------
 
   @doc """
-  Returns all Claim nodes. Use with care on large graphs — prefer
-  filtered queries in production.
+  Returns all Claim nodes in a given graph, respecting visibility rules for
+  the requesting user:
+  - "system" nodes are visible to all members
+  - "private" nodes are only visible to their creator
+  - "shared" nodes are visible to all members (shared_with is empty) or to
+    the users listed in shared_with
+
+  Pass `user_id: nil` to skip visibility filtering (internal use only).
   """
-  @spec list() :: {:ok, [Node.t()]} | {:error, any()}
-  def list do
-    case Graph.query("MATCH (n:Claim) RETURN n") do
+  @spec list(String.t(), keyword()) :: {:ok, [Node.t()]} | {:error, any()}
+  def list(graph_id, opts \\ []) when is_binary(graph_id) do
+    user_id = Keyword.get(opts, :user_id)
+
+    cypher = """
+    MATCH (n:Claim {graph_id: $graph_id})
+    WHERE n.visibility = 'system'
+       OR n.created_by = $user_id
+       OR (n.visibility = 'shared' AND (size(coalesce(n.shared_with, [])) = 0 OR $user_id IN coalesce(n.shared_with, [])))
+    RETURN n
+    """
+
+    params = %{graph_id: graph_id, user_id: user_id}
+
+    case Graph.query(cypher, params) do
       {:ok, rows} -> {:ok, Enum.map(rows, &node_from_row/1)}
       {:error, reason} -> {:error, reason}
     end
@@ -66,57 +84,69 @@ defmodule Xwa.Graph.Nodes do
   end
 
   @doc """
-  Returns all Claim nodes referencing a given source document UUID.
+  Returns all Claim nodes in a graph referencing a given source document UUID.
   """
-  @spec list_by_document(String.t()) :: {:ok, [Node.t()]} | {:error, any()}
-  def list_by_document(document_id) when is_binary(document_id) do
+  @spec list_by_document(String.t(), String.t()) :: {:ok, [Node.t()]} | {:error, any()}
+  def list_by_document(graph_id, document_id)
+      when is_binary(graph_id) and is_binary(document_id) do
     cypher = """
-    MATCH (n:Claim {source_document_id: $document_id})
+    MATCH (n:Claim {graph_id: $graph_id, source_document_id: $document_id})
     RETURN n
     ORDER BY n.asserted_at ASC
     """
 
-    case Graph.query(cypher, %{document_id: document_id}) do
+    case Graph.query(cypher, %{graph_id: graph_id, document_id: document_id}) do
       {:ok, rows} -> {:ok, Enum.map(rows, &node_from_row/1)}
       {:error, reason} -> {:error, reason}
     end
   end
 
   @doc """
-  Returns all Claim nodes with a given corpus_layer value.
+  Returns all Claim nodes in a graph with a given corpus_layer value.
   """
-  @spec list_by_corpus_layer(String.t()) :: {:ok, [Node.t()]} | {:error, any()}
-  def list_by_corpus_layer(layer) when is_binary(layer) do
-    case Graph.query("MATCH (n:Claim {corpus_layer: $layer}) RETURN n", %{layer: layer}) do
-      {:ok, rows} -> {:ok, Enum.map(rows, &node_from_row/1)}
-      {:error, reason} -> {:error, reason}
-    end
-  end
-
-  @doc """
-  Returns all Claim nodes awaiting human validation.
-  """
-  @spec list_unvalidated() :: {:ok, [Node.t()]} | {:error, any()}
-  def list_unvalidated do
+  @spec list_by_corpus_layer(String.t(), String.t()) :: {:ok, [Node.t()]} | {:error, any()}
+  def list_by_corpus_layer(graph_id, layer)
+      when is_binary(graph_id) and is_binary(layer) do
     cypher = """
-    MATCH (n:Claim)
+    MATCH (n:Claim {graph_id: $graph_id, corpus_layer: $layer})
+    RETURN n
+    """
+
+    case Graph.query(cypher, %{graph_id: graph_id, layer: layer}) do
+      {:ok, rows} -> {:ok, Enum.map(rows, &node_from_row/1)}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @doc """
+  Returns all Claim nodes in a graph awaiting human validation.
+  """
+  @spec list_unvalidated(String.t()) :: {:ok, [Node.t()]} | {:error, any()}
+  def list_unvalidated(graph_id) when is_binary(graph_id) do
+    cypher = """
+    MATCH (n:Claim {graph_id: $graph_id})
     WHERE n.human_validated = false
     RETURN n
     ORDER BY n.confidence ASC
     """
 
-    case Graph.query(cypher) do
+    case Graph.query(cypher, %{graph_id: graph_id}) do
       {:ok, rows} -> {:ok, Enum.map(rows, &node_from_row/1)}
       {:error, reason} -> {:error, reason}
     end
   end
 
   @doc """
-  Returns all Claim nodes flagged as contested.
+  Returns all Claim nodes in a graph flagged as contested.
   """
-  @spec list_contested() :: {:ok, [Node.t()]} | {:error, any()}
-  def list_contested do
-    case Graph.query("MATCH (n:Claim {contested: true}) RETURN n") do
+  @spec list_contested(String.t()) :: {:ok, [Node.t()]} | {:error, any()}
+  def list_contested(graph_id) when is_binary(graph_id) do
+    cypher = """
+    MATCH (n:Claim {graph_id: $graph_id, contested: true})
+    RETURN n
+    """
+
+    case Graph.query(cypher, %{graph_id: graph_id}) do
       {:ok, rows} -> {:ok, Enum.map(rows, &node_from_row/1)}
       {:error, reason} -> {:error, reason}
     end
@@ -130,9 +160,6 @@ defmodule Xwa.Graph.Nodes do
   """
   @spec lineage(String.t()) :: {:ok, [Node.t()]} | {:error, any()}
   def lineage(id) when is_binary(id) do
-    # Walk the superseded_by chain by repeatedly fetching the next node.
-    # We do this in Elixir rather than Cypher because superseded_by is
-    # a property (not an edge), so there's no native path syntax for it.
     case get(id) do
       {:ok, nil} ->
         {:ok, []}
@@ -190,16 +217,15 @@ defmodule Xwa.Graph.Nodes do
 
   Allowed fields: `content`, `summary`, `type`, `tags`, `asserted_at`,
   `source_type`, `corpus_layer`, `confidence`, `human_validated`,
-  `contested`, `public`, `encrypted`, `notes`.
-
-  To modify `shared_with`, use `share_with/2` and `unshare_with/2`.
+  `contested`, `public`, `encrypted`, `visibility`, `notes`.
   """
   @spec update(String.t(), map()) :: {:ok, Node.t()} | {:error, any()}
   def update(id, attrs) when is_binary(id) and is_map(attrs) do
     allowed = ~w(
       content summary type tags asserted_at
       source_type corpus_layer confidence
-      human_validated contested public encrypted notes
+      human_validated contested public encrypted
+      visibility notes
     )a
 
     updates =
@@ -234,9 +260,6 @@ defmodule Xwa.Graph.Nodes do
 
   @doc """
   Stores the embedding vector on a Claim node.
-
-  This is intentionally separate from `update/2` because embeddings are
-  set by the AI pipeline, not user edits, and may be large.
   """
   @spec set_embedding(String.t(), [float()]) :: :ok | {:error, any()}
   def set_embedding(id, embedding) when is_binary(id) and is_list(embedding) do
@@ -250,9 +273,6 @@ defmodule Xwa.Graph.Nodes do
 
   @doc """
   Marks a node as superseded by another node.
-
-  Sets `superseded_by` on the old node to point to the new node's UUID.
-  Neither node is deleted.
   """
   @spec supersede(String.t(), String.t()) :: :ok | {:error, any()}
   def supersede(old_id, new_id) when is_binary(old_id) and is_binary(new_id) do
@@ -267,7 +287,7 @@ defmodule Xwa.Graph.Nodes do
 
   @doc """
   Adds a user UUID to the `validated_by` list and sets `human_validated`
-  to true. Idempotent — adding the same validator twice has no effect.
+  to true. Idempotent.
   """
   @spec validate_node(String.t(), String.t()) :: {:ok, Node.t()} | {:error, any()}
   def validate_node(node_id, user_id) when is_binary(node_id) and is_binary(user_id) do
@@ -301,9 +321,7 @@ defmodule Xwa.Graph.Nodes do
   end
 
   @doc """
-  Adds a user UUID to the `shared_with` list on a private node.
-  Idempotent — adding the same user twice has no effect.
-  Has no meaningful effect when `public` is true, but is safe to call.
+  Adds a user UUID to the `shared_with` list on a node. Idempotent.
   """
   @spec share_with(String.t(), String.t()) :: {:ok, Node.t()} | {:error, any()}
   def share_with(node_id, user_id) when is_binary(node_id) and is_binary(user_id) do
@@ -325,8 +343,7 @@ defmodule Xwa.Graph.Nodes do
   end
 
   @doc """
-  Removes a user UUID from the `shared_with` list on a node.
-  Idempotent — removing a user not in the list has no effect.
+  Removes a user UUID from the `shared_with` list on a node. Idempotent.
   """
   @spec unshare_with(String.t(), String.t()) :: {:ok, Node.t()} | {:error, any()}
   def unshare_with(node_id, user_id) when is_binary(node_id) and is_binary(user_id) do
@@ -344,24 +361,23 @@ defmodule Xwa.Graph.Nodes do
   end
 
   @doc """
-  MERGE a concept node by content — creates it if no node with
-  `type: "concept"` and that exact `content` exists, otherwise returns
-  the existing node.
+  MERGE a concept node by content within a graph — creates it if no node with
+  `type: "concept"` and that exact `content` and `graph_id` exists, otherwise
+  returns the existing node.
 
-  Used for `[[WikiLink]]` references: the same concept (e.g. "Christology")
-  authored across multiple documents resolves to one shared node.
+  Used for `[[WikiLink]]` references.
   """
   @spec merge_concept(map()) :: {:ok, Node.t()} | {:error, any()}
   def merge_concept(attrs) when is_map(attrs) do
     content = Map.fetch!(attrs, :content)
+    graph_id = Map.get(attrs, :graph_id)
 
     cypher = """
-    MERGE (n:Claim {type: "concept", content: $content})
+    MERGE (n:Claim {type: "concept", content: $content, graph_id: $graph_id})
     ON CREATE SET n += $props
     RETURN n
     """
 
-    # Build a full props map but always force type/content for the MERGE key
     node_id = Ecto.UUID.generate()
     now = DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
 
@@ -384,12 +400,14 @@ defmodule Xwa.Graph.Nodes do
         encrypted: false,
         tags: [],
         validated_by: [],
-        shared_with: []
+        shared_with: [],
+        graph_id: graph_id,
+        visibility: "system"
       }
       |> Enum.reject(fn {_k, v} -> is_nil(v) end)
       |> Enum.into(%{})
 
-    case Graph.query(cypher, %{content: content, props: props}) do
+    case Graph.query(cypher, %{content: content, graph_id: graph_id, props: props}) do
       {:ok, [row | _]} -> {:ok, node_from_row(row)}
       {:ok, []} -> {:error, :no_result}
       {:error, reason} -> {:error, reason}
@@ -418,7 +436,6 @@ defmodule Xwa.Graph.Nodes do
 
   defp build_lineage_chain(%Node{superseded_by: next_id}, chain, seen) do
     if MapSet.member?(seen, next_id) do
-      # Cycle guard — should not happen in a well-formed graph
       Enum.reverse(chain)
     else
       case get(next_id) do

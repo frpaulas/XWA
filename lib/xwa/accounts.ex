@@ -16,8 +16,11 @@ defmodule Xwa.Accounts do
   intentional — email addresses are not reliable cross-provider identifiers.
   """
 
+  require Logger
+
   alias Xwa.Repo
   alias Xwa.Accounts.User
+  alias Xwa.Graphs
 
   # ---------------------------------------------------------------------------
   # Queries
@@ -70,9 +73,22 @@ defmodule Xwa.Accounts do
 
     case get_user_by_provider(provider, provider_id) do
       nil ->
-        %User{}
-        |> User.oauth_changeset(attrs)
-        |> Repo.insert()
+        with {:ok, user} <-
+               %User{}
+               |> User.oauth_changeset(attrs)
+               |> Repo.insert() do
+          case Graphs.bootstrap_for_user(user) do
+            {:ok, _} ->
+              {:ok, user}
+
+            {:error, step, changeset, _} ->
+              Logger.error(
+                "[Accounts] Failed to bootstrap graph for new user #{user.id} at step #{step}: #{inspect(changeset)}"
+              )
+              # Return the user anyway — they can still log in, bootstrap can be retried
+              {:ok, user}
+          end
+        end
 
       existing_user ->
         # Update mutable fields (name, avatar) in case they changed at the provider

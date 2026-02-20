@@ -63,7 +63,13 @@ defmodule Xwa.Graph.Edge do
     confidence: 1.0,
     ai_inferred: true,
     human_validated: false,
-    contested: false
+    contested: false,
+    # Multi-graph tenancy
+    # visibility: "system"  = AI-extracted, visible to all graph members;
+    #             "private" = only visible to created_by user;
+    #             "shared"  = visible to members in shared_with (all if empty)
+    graph_id: nil,
+    visibility: "system"
   ]
 
   @type certainty :: String.t()
@@ -87,7 +93,9 @@ defmodule Xwa.Graph.Edge do
           created_by: String.t() | nil,
           validated_by: [String.t()],
           hidden_by: [String.t()],
-          notes: String.t() | nil
+          notes: String.t() | nil,
+          graph_id: String.t() | nil,
+          visibility: String.t()
         }
 
   @doc """
@@ -117,7 +125,9 @@ defmodule Xwa.Graph.Edge do
       extracted_at: Map.get(attrs, :extracted_at) || utc_now_iso(),
       created_by: Map.get(attrs, :created_by),
       validated_by: Map.get(attrs, :validated_by, []),
-      notes: Map.get(attrs, :notes)
+      notes: Map.get(attrs, :notes),
+      graph_id: Map.get(attrs, :graph_id),
+      visibility: Map.get(attrs, :visibility, "system")
     }
 
     case validate(edge) do
@@ -197,7 +207,9 @@ defmodule Xwa.Graph.Edge do
       created_by: props["created_by"],
       validated_by: Map.get(props, "validated_by", []),
       hidden_by: Map.get(props, "hidden_by", []),
-      notes: props["notes"]
+      notes: props["notes"],
+      graph_id: props["graph_id"],
+      visibility: Map.get(props, "visibility", "system")
     }
   end
 

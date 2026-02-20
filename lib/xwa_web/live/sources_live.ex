@@ -189,7 +189,8 @@ defmodule XwaWeb.SourcesLive do
                    owner_id: user_id
                  ) do
               {:ok, document} ->
-                IngestionWorker.run_async(document.id, user_id)
+                graph_id = socket.assigns.current_scope.graph_id
+                IngestionWorker.run_async(document.id, user_id, graph_id)
 
                 documents = Documents.list_documents()
 

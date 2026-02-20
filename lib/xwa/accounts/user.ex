@@ -14,6 +14,10 @@ defmodule Xwa.Accounts.User do
     field :provider, :string
     field :provider_id, :string
 
+    belongs_to :organization, Xwa.Accounts.Organization
+    has_many :graph_memberships, Xwa.Graphs.GraphMembership
+    has_many :graphs, through: [:graph_memberships, :graph]
+
     timestamps(type: :utc_datetime)
   end
 

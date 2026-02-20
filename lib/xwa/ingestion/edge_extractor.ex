@@ -9,10 +9,14 @@ defmodule Xwa.Ingestion.EdgeExtractor do
 
   ## Usage
 
-      {:ok, edges} = EdgeExtractor.extract(new_node, existing_nodes, %{
+      {:ok, edges, usage} = EdgeExtractor.extract(new_node, existing_nodes, %{
         document_id: doc.id,
+        graph_id:    graph_id,
         created_by:  user_id
       })
+
+  `usage` is a map with keys: `:input_tokens`, `:output_tokens`,
+  `:finish_reason`, `:latency_ms`, `:model`.
   """
 
   alias Xwa.Graph.{Edge, Node}
@@ -24,23 +28,20 @@ defmodule Xwa.Ingestion.EdgeExtractor do
   @doc """
   Proposes edges between `new_node` and the list of `existing_nodes`.
 
-  `context` map keys:
-  - `:document_id` — UUID of the source document (stored on created edges)
-  - `:created_by`  — UUID of the user who uploaded the document
-
-  Returns `{:ok, [%Edge{}]}` or `{:error, reason}`.
-  Returns `{:ok, []}` when the graph is empty or no relationships are found.
+  Returns `{:ok, [%Edge{}], usage_map}` or `{:error, reason}`.
+  Returns `{:ok, [], %{}}` when the graph is empty or no relationships are found.
   """
-  @spec extract(Node.t(), [Node.t()], map()) :: {:ok, [Edge.t()]} | {:error, term()}
+  @spec extract(Node.t(), [Node.t()], map()) ::
+          {:ok, [Edge.t()], map()} | {:error, term()}
   def extract(%Node{} = new_node, existing_nodes, context)
       when is_list(existing_nodes) and is_map(context) do
     if existing_nodes == [] do
-      {:ok, []}
+      {:ok, [], %{}}
     else
       with {:ok, prompt} <- build_prompt(new_node, existing_nodes),
-           {:ok, raw_json} <- call_claude(prompt),
+           {:ok, raw_json, usage} <- call_claude(prompt),
            {:ok, edges} <- parse_response(raw_json, new_node, context) do
-        {:ok, edges}
+        {:ok, edges, usage}
       end
     end
   end
@@ -88,19 +89,37 @@ defmodule Xwa.Ingestion.EdgeExtractor do
         messages: [%{role: "user", content: prompt}]
       }
 
-      case Req.post("https://api.anthropic.com/v1/messages",
-             json: body,
-             headers: [
-               {"x-api-key", api_key},
-               {"anthropic-version", "2023-06-01"}
-             ],
-             receive_timeout: 60_000
-           ) do
-        {:ok, %{status: 200, body: body}} ->
-          extract_text_from_response(body)
+      t0 = System.monotonic_time(:millisecond)
 
-        {:ok, %{status: status, body: body}} ->
-          {:error, {:api_error, status, body}}
+      result =
+        Req.post("https://api.anthropic.com/v1/messages",
+          json: body,
+          headers: [
+            {"x-api-key", api_key},
+            {"anthropic-version", "2023-06-01"}
+          ],
+          receive_timeout: 60_000
+        )
+
+      latency_ms = System.monotonic_time(:millisecond) - t0
+
+      case result do
+        {:ok, %{status: 200, body: resp_body}} ->
+          usage = %{
+            input_tokens: get_in(resp_body, ["usage", "input_tokens"]),
+            output_tokens: get_in(resp_body, ["usage", "output_tokens"]),
+            finish_reason: resp_body["stop_reason"],
+            latency_ms: latency_ms,
+            model: resp_body["model"] || model()
+          }
+
+          case extract_text_from_response(resp_body) do
+            {:ok, text} -> {:ok, text, usage}
+            error -> error
+          end
+
+        {:ok, %{status: status, body: resp_body}} ->
+          {:error, {:api_error, status, resp_body}}
 
         {:error, reason} ->
           {:error, {:http_error, reason}}
@@ -117,10 +136,11 @@ defmodule Xwa.Ingestion.EdgeExtractor do
     with {:ok, %{"edges" => edges}} when is_list(edges) <- Jason.decode(json_str) do
       document_id = Map.get(context, :document_id)
       created_by = Map.get(context, :created_by)
+      graph_id = Map.get(context, :graph_id)
 
       result =
         edges
-        |> Enum.map(&edge_to_attrs(&1, new_node.id, document_id, created_by))
+        |> Enum.map(&edge_to_attrs(&1, new_node.id, document_id, created_by, graph_id))
         |> Enum.flat_map(fn attrs ->
           case Edge.new(attrs) do
             {:ok, edge} -> [edge]
@@ -142,8 +162,7 @@ defmodule Xwa.Ingestion.EdgeExtractor do
     end
   end
 
-  defp edge_to_attrs(edge, new_node_id, document_id, created_by) do
-    # The prompt uses "NEW" as a placeholder for the new node's id
+  defp edge_to_attrs(edge, new_node_id, document_id, created_by, graph_id) do
     to_id =
       case edge["to_node_id"] do
         "NEW" -> new_node_id
@@ -162,7 +181,9 @@ defmodule Xwa.Ingestion.EdgeExtractor do
       source_document_ids: if(document_id, do: [document_id], else: []),
       created_by: created_by,
       ai_inferred: true,
-      human_validated: false
+      human_validated: false,
+      graph_id: graph_id,
+      visibility: "system"
     }
   end
 

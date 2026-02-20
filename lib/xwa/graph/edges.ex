@@ -10,8 +10,15 @@ defmodule Xwa.Graph.Edges do
 
   Physically, all edges are stored from → to in Memgraph. For edges where
   `directed: false`, queries use the undirected pattern `(a)-[:RELATES]-(b)`
-  so both traversal directions are considered. The `directed` flag on the
-  returned struct tells callers how to interpret the relationship.
+  so both traversal directions are considered.
+
+  ## Graph tenancy
+
+  Every edge carries a `graph_id` property scoping it to one Postgres Graph.
+  List functions require a `graph_id`. Visibility rules mirror nodes:
+  - "system"  — AI-extracted, visible to all graph members
+  - "private" — only visible to `created_by` user
+  - "shared"  — visible to members in `shared_with` (or all if empty)
 
   ## Edge identity
 
@@ -54,42 +61,78 @@ defmodule Xwa.Graph.Edges do
   end
 
   @doc """
-  Returns all edges leaving or arriving at a given node.
+  Returns all visible edges in a graph for the given user.
 
-  For directed edges, only outgoing edges from the node are returned
-  unless `direction: :in` or `direction: :both` is specified.
-  For undirected edges (directed: false), both directions are always
-  returned regardless of the option.
+  Visibility rules:
+  - "system" edges are visible to all members
+  - "private" edges are only visible to their creator
+  - "shared" edges are visible to all (empty shared_with) or listed users
+  - Additionally filters out edges where user_id is in hidden_by
+  """
+  @spec list(String.t(), String.t()) :: {:ok, [Edge.t()]} | {:error, any()}
+  def list(graph_id, user_id) when is_binary(graph_id) and is_binary(user_id) do
+    cypher = """
+    MATCH ()-[r:RELATES {graph_id: $graph_id}]->()
+    WHERE (r.visibility = 'system'
+        OR r.created_by = $user_id
+        OR (r.visibility = 'shared' AND (size(coalesce(r.shared_with, [])) = 0 OR $user_id IN coalesce(r.shared_with, []))))
+      AND NOT $user_id IN coalesce(r.hidden_by, [])
+    RETURN r
+    """
+
+    case Graph.query(cypher, %{graph_id: graph_id, user_id: user_id}) do
+      {:ok, rows} -> {:ok, Enum.map(rows, &edge_from_row/1)}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @doc """
+  Returns all edges leaving or arriving at a given node, respecting visibility.
 
   ## Options
-
     - `:direction` — `:out` (default), `:in`, or `:both`
     - `:type` — filter by emergent type string
+    - `:user_id` — required for visibility filtering
   """
   @spec list_for_node(String.t(), keyword()) :: {:ok, [Edge.t()]} | {:error, any()}
   def list_for_node(node_id, opts \\ []) when is_binary(node_id) do
     direction = Keyword.get(opts, :direction, :out)
     type_filter = Keyword.get(opts, :type)
+    user_id = Keyword.get(opts, :user_id)
 
-    {match_pattern, return_clause} =
+    match_pattern =
       case direction do
-        :in -> {"(other:Claim)-[r:RELATES]->(n:Claim {id: $node_id})", "r"}
-        :both -> {"(n:Claim {id: $node_id})-[r:RELATES]-(other:Claim)", "r"}
-        _ -> {"(n:Claim {id: $node_id})-[r:RELATES]->(other:Claim)", "r"}
+        :in -> "(other:Claim)-[r:RELATES]->(n:Claim {id: $node_id})"
+        :both -> "(n:Claim {id: $node_id})-[r:RELATES]-(other:Claim)"
+        _ -> "(n:Claim {id: $node_id})-[r:RELATES]->(other:Claim)"
       end
 
-    {where_clause, params} =
-      if type_filter do
-        {"WHERE r.type = $type", %{node_id: node_id, type: type_filter}}
+    type_clause = if type_filter, do: "AND r.type = $type", else: ""
+
+    visibility_clause =
+      if user_id do
+        """
+        AND (r.visibility = 'system'
+          OR r.created_by = $user_id
+          OR (r.visibility = 'shared' AND (size(coalesce(r.shared_with, [])) = 0 OR $user_id IN coalesce(r.shared_with, []))))
+        AND NOT $user_id IN coalesce(r.hidden_by, [])
+        """
       else
-        {"", %{node_id: node_id}}
+        ""
       end
 
     cypher = """
     MATCH #{match_pattern}
-    #{where_clause}
-    RETURN #{return_clause}
+    WHERE 1=1
+    #{type_clause}
+    #{visibility_clause}
+    RETURN r
     """
+
+    params =
+      %{node_id: node_id}
+      |> then(fn p -> if type_filter, do: Map.put(p, :type, type_filter), else: p end)
+      |> then(fn p -> if user_id, do: Map.put(p, :user_id, user_id), else: p end)
 
     case Graph.query(cypher, params) do
       {:ok, rows} -> {:ok, Enum.map(rows, &edge_from_row/1)}
@@ -99,7 +142,6 @@ defmodule Xwa.Graph.Edges do
 
   @doc """
   Returns all edges between two specific nodes, in either direction.
-  Useful for checking whether a relationship already exists before creating one.
   """
   @spec list_between(String.t(), String.t()) :: {:ok, [Edge.t()]} | {:error, any()}
   def list_between(from_id, to_id) when is_binary(from_id) and is_binary(to_id) do
@@ -115,17 +157,16 @@ defmodule Xwa.Graph.Edges do
   end
 
   @doc """
-  Returns all edges of a given emergent type across the whole graph.
-  Use with care on large graphs.
+  Returns all edges of a given emergent type within a graph.
   """
-  @spec list_by_type(String.t()) :: {:ok, [Edge.t()]} | {:error, any()}
-  def list_by_type(type) when is_binary(type) do
+  @spec list_by_type(String.t(), String.t()) :: {:ok, [Edge.t()]} | {:error, any()}
+  def list_by_type(graph_id, type) when is_binary(graph_id) and is_binary(type) do
     cypher = """
-    MATCH ()-[r:RELATES {type: $type}]->()
+    MATCH ()-[r:RELATES {graph_id: $graph_id, type: $type}]->()
     RETURN r
     """
 
-    case Graph.query(cypher, %{type: type}) do
+    case Graph.query(cypher, %{graph_id: graph_id, type: type}) do
       {:ok, rows} -> {:ok, Enum.map(rows, &edge_from_row/1)}
       {:error, reason} -> {:error, reason}
     end
@@ -133,7 +174,6 @@ defmodule Xwa.Graph.Edges do
 
   @doc """
   Returns all edges referencing a given source document UUID.
-  Useful for reviewing everything extracted from a single document.
   """
   @spec list_by_document(String.t()) :: {:ok, [Edge.t()]} | {:error, any()}
   def list_by_document(document_id) when is_binary(document_id) do
@@ -150,47 +190,51 @@ defmodule Xwa.Graph.Edges do
   end
 
   @doc """
-  Returns all contested edges.
+  Returns all contested edges in a graph.
   """
-  @spec list_contested() :: {:ok, [Edge.t()]} | {:error, any()}
-  def list_contested do
-    case Graph.query("MATCH ()-[r:RELATES {contested: true}]->() RETURN r") do
+  @spec list_contested(String.t()) :: {:ok, [Edge.t()]} | {:error, any()}
+  def list_contested(graph_id) when is_binary(graph_id) do
+    cypher = """
+    MATCH ()-[r:RELATES {graph_id: $graph_id, contested: true}]->()
+    RETURN r
+    """
+
+    case Graph.query(cypher, %{graph_id: graph_id}) do
       {:ok, rows} -> {:ok, Enum.map(rows, &edge_from_row/1)}
       {:error, reason} -> {:error, reason}
     end
   end
 
   @doc """
-  Returns all edges awaiting human validation.
+  Returns all edges in a graph awaiting human validation.
   """
-  @spec list_unvalidated() :: {:ok, [Edge.t()]} | {:error, any()}
-  def list_unvalidated do
+  @spec list_unvalidated(String.t()) :: {:ok, [Edge.t()]} | {:error, any()}
+  def list_unvalidated(graph_id) when is_binary(graph_id) do
     cypher = """
-    MATCH ()-[r:RELATES]->()
+    MATCH ()-[r:RELATES {graph_id: $graph_id}]->()
     WHERE r.human_validated = false
     RETURN r
     ORDER BY r.confidence ASC
     """
 
-    case Graph.query(cypher) do
+    case Graph.query(cypher, %{graph_id: graph_id}) do
       {:ok, rows} -> {:ok, Enum.map(rows, &edge_from_row/1)}
       {:error, reason} -> {:error, reason}
     end
   end
 
   @doc """
-  Returns all distinct emergent edge type strings currently in the graph.
-  Useful for exploring the accumulated ontology vocabulary.
+  Returns all distinct emergent edge type strings in a graph.
   """
-  @spec list_types() :: {:ok, [String.t()]} | {:error, any()}
-  def list_types do
+  @spec list_types(String.t()) :: {:ok, [String.t()]} | {:error, any()}
+  def list_types(graph_id) when is_binary(graph_id) do
     cypher = """
-    MATCH ()-[r:RELATES]->()
+    MATCH ()-[r:RELATES {graph_id: $graph_id}]->()
     RETURN DISTINCT r.type AS type
     ORDER BY type ASC
     """
 
-    case Graph.query(cypher) do
+    case Graph.query(cypher, %{graph_id: graph_id}) do
       {:ok, rows} -> {:ok, Enum.map(rows, & &1["type"])}
       {:error, reason} -> {:error, reason}
     end
@@ -243,19 +287,16 @@ defmodule Xwa.Graph.Edges do
   @doc """
   Updates mutable fields on an existing edge.
 
-  Only the fields present in `attrs` are changed. `id`, `from_node_id`,
-  and `to_node_id` are never updated — they are the stable identity of
-  the edge.
-
   Allowed fields: `type`, `label`, `directed`, `importance`, `certainty`,
-  `confidence`, `human_validated`, `contested`, `source_document_ids`, `notes`.
+  `confidence`, `human_validated`, `contested`, `source_document_ids`,
+  `visibility`, `notes`.
   """
   @spec update(String.t(), map()) :: {:ok, Edge.t()} | {:error, any()}
   def update(id, attrs) when is_binary(id) and is_map(attrs) do
     allowed = ~w(
       type label directed importance certainty
       confidence human_validated contested
-      source_document_ids notes
+      source_document_ids visibility notes
     )a
 
     updates =
@@ -290,7 +331,7 @@ defmodule Xwa.Graph.Edges do
 
   @doc """
   Adds a user UUID to the `validated_by` list and sets `human_validated`
-  to true. Idempotent — adding the same validator twice has no effect.
+  to true. Idempotent.
   """
   @spec validate_edge(String.t(), String.t()) :: {:ok, Edge.t()} | {:error, any()}
   def validate_edge(edge_id, user_id) when is_binary(edge_id) and is_binary(user_id) do
@@ -324,11 +365,7 @@ defmodule Xwa.Graph.Edges do
   end
 
   @doc """
-  Adds a source document UUID to an edge's `source_document_ids` list.
-  Idempotent — adding the same document twice has no effect.
-
-  Used when a relationship is subsequently evidenced by an additional
-  document — more sources strengthen confidence.
+  Adds a source document UUID to an edge's `source_document_ids` list. Idempotent.
   """
   @spec add_source_document(String.t(), String.t()) :: :ok | {:error, any()}
   def add_source_document(edge_id, document_id)
@@ -347,8 +384,7 @@ defmodule Xwa.Graph.Edges do
 
   @doc """
   Hides an edge for a specific user by appending their UUID to the
-  `hidden_by` list. The edge remains in the graph for all other users.
-  Idempotent — adding the same user twice has no effect.
+  `hidden_by` list. Idempotent.
   """
   @spec hide_for(String.t(), String.t()) :: :ok | {:error, any()}
   def hide_for(edge_id, user_id) when is_binary(edge_id) and is_binary(user_id) do
