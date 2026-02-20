@@ -30,6 +30,26 @@ if config_env() == :prod do
       For example: ecto://USER:PASS@HOST/DATABASE
       """
 
+  # Memgraph via Bolt
+  memgraph_url = System.get_env("MEMGRAPH_URL") || "bolt://localhost:7687"
+
+  config :bolt_sips, Bolt,
+    url: memgraph_url,
+    pool_size: String.to_integer(System.get_env("BOLT_POOL_SIZE") || "10"),
+    prefix: :default
+
+  # Anthropic API key for claim/edge extraction
+  config :xwa, :anthropic_api_key, System.get_env("ANTHROPIC_API_KEY")
+
+  # Claude model overrides (optional — defaults match dev.exs)
+  if model = System.get_env("CLAUDE_CLAIM_MODEL") do
+    config :xwa, :claude_claim_model, model
+  end
+
+  if model = System.get_env("CLAUDE_EDGE_MODEL") do
+    config :xwa, :claude_edge_model, model
+  end
+
   maybe_ipv6 = if System.get_env("ECTO_IPV6") in ~w(true 1), do: [:inet6], else: []
 
   config :xwa, Xwa.Repo,
