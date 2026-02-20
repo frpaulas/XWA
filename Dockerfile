@@ -40,13 +40,13 @@ COPY priv priv
 
 COPY lib lib
 
+# Compile the app first so phoenix-colocated hooks are generated into _build
+RUN mix compile
+
 COPY assets assets
 
 # compile assets
 RUN mix assets.deploy
-
-# Compile the release
-RUN mix compile
 
 # Changes to config/runtime.exs don't require recompiling the code
 COPY config/runtime.exs config/
