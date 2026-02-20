@@ -33,7 +33,7 @@ config :bolt_sips, Bolt,
 
 # Configure your database
 config :xwa, Xwa.Repo,
-  username: System.get_env("SWA_ADMIN") || "frpaulas",
+  username: System.get_env("XWA_DB_USER") || "frpaulas",
   password: System.get_env("SWA_PASSWORD") || "",
   socket_dir: System.get_env("SWA_SOCKET_DIR") || "/var/run/postgresql",
   hostname: "localhost",

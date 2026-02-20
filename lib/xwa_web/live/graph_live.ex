@@ -8,8 +8,15 @@ defmodule XwaWeb.GraphLive do
   def mount(_params, _session, socket) do
     user_id = socket.assigns.current_scope.user.id
     graph_id = socket.assigns.current_scope.graph_id
-    {:ok, nodes} = Nodes.list(graph_id, user_id: user_id)
-    {:ok, all_edges} = all_edges(graph_id, user_id)
+
+    {nodes, all_edges} =
+      if graph_id do
+        {:ok, n} = Nodes.list(graph_id, user_id: user_id)
+        {:ok, e} = all_edges(graph_id, user_id)
+        {n, e}
+      else
+        {[], []}
+      end
 
     socket =
       socket
