@@ -58,6 +58,7 @@ defmodule Xwa.Ingestion.IngestionWorker do
       :ok ->
         doc = Documents.get_document!(document_id)
         Documents.update_ingestion_status(doc, "complete")
+        Phoenix.PubSub.broadcast(Xwa.PubSub, "graph:#{graph_id}", {:ingestion_complete, document_id})
         Logger.info("[Ingestion] Completed ingestion for document #{document_id}")
         :ok
 
@@ -69,6 +70,7 @@ defmodule Xwa.Ingestion.IngestionWorker do
           doc -> Documents.update_ingestion_status(doc, "failed", error: inspect(reason))
         end
 
+        Phoenix.PubSub.broadcast(Xwa.PubSub, "graph:#{graph_id}", {:ingestion_failed, document_id})
         {:error, reason}
     end
   end
@@ -183,15 +185,17 @@ defmodule Xwa.Ingestion.IngestionWorker do
         {:ok, edges, usage} ->
           duration_ms = System.monotonic_time(:millisecond) - t0
 
-          log_run(%{
-            run_type: "edge",
-            document_id: doc.id,
-            graph_id: context.graph_id,
-            status: "ok",
-            edges_extracted: length(edges),
-            duration_ms: duration_ms,
-            usage: usage
-          })
+          unless map_size(usage) == 0 do
+            log_run(%{
+              run_type: "edge",
+              document_id: doc.id,
+              graph_id: context.graph_id,
+              status: "ok",
+              edges_extracted: length(edges),
+              duration_ms: duration_ms,
+              usage: usage
+            })
+          end
 
           insert_edges(edges)
 
@@ -353,6 +357,7 @@ defmodule Xwa.Ingestion.IngestionWorker do
   #   Input:  $3.00 / 1M tokens  = $0.000003 per token
   #   Output: $15.00 / 1M tokens = $0.000015 per token
   # Override via config if pricing changes.
+  defp compute_cost(_run_type, usage) when map_size(usage) == 0, do: nil
   defp compute_cost(_run_type, %{input_tokens: nil}), do: nil
   defp compute_cost(_run_type, %{output_tokens: nil}), do: nil
 

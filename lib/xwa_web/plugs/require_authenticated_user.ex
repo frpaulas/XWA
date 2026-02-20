@@ -44,11 +44,32 @@ defmodule XwaWeb.Plugs.RequireAuthenticatedUser do
   defp mount_current_scope(socket, session) do
     Phoenix.Component.assign_new(socket, :current_scope, fn ->
       user_id = session["user_id"]
+      graph_id = session["graph_id"]
 
       case user_id && Xwa.Accounts.get_user(user_id) do
         nil -> nil
-        user -> %{user: user}
+        user -> build_scope(user, graph_id)
       end
     end)
+  end
+
+  defp build_scope(user, session_graph_id) do
+    graphs = Xwa.Graphs.list_graphs_for_user(user.id)
+
+    graph =
+      if session_graph_id do
+        Enum.find(graphs, fn g -> g.id == session_graph_id end) || List.first(graphs)
+      else
+        List.first(graphs)
+      end
+
+    role = graph && Xwa.Graphs.role_for(graph.id, user.id)
+
+    %{
+      user: user,
+      graph: graph,
+      graph_id: graph && graph.id,
+      role: role
+    }
   end
 end

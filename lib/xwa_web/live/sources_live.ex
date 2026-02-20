@@ -17,6 +17,11 @@ defmodule XwaWeb.SourcesLive do
 
   @impl true
   def mount(_params, _session, socket) do
+    if connected?(socket) do
+      graph_id = socket.assigns.current_scope.graph_id
+      if graph_id, do: Phoenix.PubSub.subscribe(Xwa.PubSub, "graph:#{graph_id}")
+    end
+
     documents = Documents.list_documents()
 
     socket =
@@ -223,6 +228,12 @@ defmodule XwaWeb.SourcesLive do
 
   def handle_event("cancel_entry", %{"ref" => ref}, socket) do
     {:noreply, cancel_upload(socket, :document, ref)}
+  end
+
+  @impl true
+  def handle_info({event, _document_id}, socket)
+      when event in [:ingestion_complete, :ingestion_failed] do
+    {:noreply, assign(socket, :documents, Documents.list_documents())}
   end
 
   # ---------------------------------------------------------------------------
