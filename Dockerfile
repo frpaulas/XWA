@@ -3,8 +3,8 @@
 #   https://fly.io/docs/languages-and-frameworks/dockerfile/
 
 ARG ELIXIR_VERSION=1.19.5
-ARG OTP_VERSION=28.3.1
-ARG DEBIAN_VERSION=trixie-20250203-slim
+ARG OTP_VERSION=28.3.2
+ARG DEBIAN_VERSION=trixie-20260202-slim
 
 ARG BUILDER_IMAGE="hexpm/elixir:${ELIXIR_VERSION}-erlang-${OTP_VERSION}-debian-${DEBIAN_VERSION}"
 ARG RUNNER_IMAGE="debian:${DEBIAN_VERSION}"
