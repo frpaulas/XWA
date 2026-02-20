@@ -1,0 +1,180 @@
+<Layouts.app flash={@flash} current_scope={@current_scope}>
+  <%!-- Hero section --%>
+  <div class="relative">
+    <%!-- Subtle background grid --%>
+    <div
+      class="absolute inset-0 -z-10 opacity-[0.03] dark:opacity-[0.06]"
+      style="background-image: radial-gradient(circle, currentColor 1px, transparent 1px); background-size: 32px 32px;"
+    >
+    </div>
+
+    <div class="pt-16 pb-20 sm:pt-24 sm:pb-28 lg:pt-32 lg:pb-36">
+      <div class="mx-auto max-w-4xl text-center">
+        <%!-- Eyebrow label --%>
+        <div class="inline-flex items-center gap-2 rounded-full border border-base-300 bg-base-200 px-4 py-1.5 text-xs font-medium text-base-content/60 uppercase tracking-widest mb-8">
+          <span class="inline-block h-1.5 w-1.5 rounded-full bg-primary animate-pulse"></span>
+          Institutional Knowledge Explorer
+        </div>
+
+        <%!-- Headline --%>
+        <h1 class="text-5xl sm:text-6xl lg:text-7xl font-bold tracking-tight text-base-content leading-[1.05] mb-6">
+          The gap between what<br class="hidden sm:block" />
+          <span class="text-primary">institutions say</span>
+          <br class="hidden sm:block" /> and what they <span class="text-primary">do</span>
+        </h1>
+
+        <%!-- Subheading --%>
+        <p class="mx-auto max-w-2xl text-lg sm:text-xl text-base-content/60 leading-relaxed mb-12">
+          XWA extracts claims from institutional documents, maps the relationships
+          between them, and surfaces the friction — between aspiration and record,
+          between stated intent and documented reality.
+        </p>
+
+        <%!-- CTA --%>
+        <%= if @current_scope do %>
+          <div class="flex flex-col sm:flex-row gap-4 justify-center">
+            <a
+              href="#"
+              class="inline-flex items-center justify-center gap-2 rounded-xl bg-primary px-8 py-3.5 text-base font-semibold text-primary-content shadow-md hover:brightness-110 active:scale-95 transition-all"
+            >
+              Open Graph
+              <svg
+                class="w-4 h-4"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+                stroke-width="2"
+              >
+                <path
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  d="M13.5 4.5L21 12m0 0l-7.5 7.5M21 12H3"
+                />
+              </svg>
+            </a>
+            <a
+              href="#"
+              class="inline-flex items-center justify-center gap-2 rounded-xl border border-base-300 bg-base-200 px-8 py-3.5 text-base font-semibold text-base-content hover:bg-base-300 active:scale-95 transition-all"
+            >
+              Add Document
+            </a>
+          </div>
+        <% else %>
+          <div class="flex flex-col sm:flex-row gap-3 justify-center">
+            <a
+              href={~p"/auth/google"}
+              class="inline-flex items-center justify-center gap-3 rounded-xl border border-base-300 bg-base-100 px-6 py-3.5 text-sm font-semibold text-base-content shadow-sm hover:bg-base-200 active:scale-95 transition-all"
+            >
+              <svg class="h-5 w-5" viewBox="0 0 24 24" aria-hidden="true">
+                <path
+                  d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"
+                  fill="#4285F4"
+                />
+                <path
+                  d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"
+                  fill="#34A853"
+                />
+                <path
+                  d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"
+                  fill="#FBBC05"
+                />
+                <path
+                  d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"
+                  fill="#EA4335"
+                />
+              </svg>
+              Continue with Google
+            </a>
+            <a
+              href={~p"/auth/github"}
+              class="inline-flex items-center justify-center gap-3 rounded-xl border border-base-300 bg-base-100 px-6 py-3.5 text-sm font-semibold text-base-content shadow-sm hover:bg-base-200 active:scale-95 transition-all"
+            >
+              <svg class="h-5 w-5" viewBox="0 0 24 24" aria-hidden="true" fill="currentColor">
+                <path
+                  fill-rule="evenodd"
+                  clip-rule="evenodd"
+                  d="M12 0C5.37 0 0 5.506 0 12.303c0 5.445 3.435 10.043 8.205 11.674.6.107.825-.262.825-.585 0-.292-.015-1.261-.015-2.291C6 21.67 5.22 20.346 4.98 19.654c-.135-.354-.72-1.446-1.23-1.738-.42-.23-1.02-.8-.015-.815.945-.015 1.62.892 1.845 1.261 1.08 1.86 2.805 1.338 3.495 1.015.105-.8.42-1.338.765-1.645-2.67-.308-5.46-1.37-5.46-6.075 0-1.338.465-2.446 1.23-3.307-.12-.308-.54-1.569.12-3.26 0 0 1.005-.323 3.3 1.26.96-.276 1.98-.415 3-.415s2.04.139 3 .416c2.295-1.6 3.3-1.261 3.3-1.261.66 1.691.24 2.952.12 3.26.765.861 1.23 1.953 1.23 3.307 0 4.721-2.805 5.767-5.475 6.075.435.384.81 1.122.81 2.276 0 1.645-.015 2.968-.015 3.383 0 .323.225.707.825.585a12.047 12.047 0 0 0 5.919-4.489A12.536 12.536 0 0 0 24 12.304C24 5.505 18.63 0 12 0Z"
+                />
+              </svg>
+              Continue with GitHub
+            </a>
+          </div>
+          <p class="mt-4 text-xs text-base-content/40">
+            No password required. Sign in with your existing account.
+          </p>
+        <% end %>
+      </div>
+    </div>
+
+    <%!-- Feature grid --%>
+    <div class="grid grid-cols-1 gap-6 sm:grid-cols-3 mt-4 mb-20">
+      <div class="rounded-2xl border border-base-200 bg-base-100 p-6 hover:border-primary/30 hover:shadow-md transition-all">
+        <div class="flex h-10 w-10 items-center justify-center rounded-xl bg-primary/10 mb-4">
+          <svg
+            class="h-5 w-5 text-primary"
+            fill="none"
+            viewBox="0 0 24 24"
+            stroke="currentColor"
+            stroke-width="1.5"
+          >
+            <path
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z"
+            />
+          </svg>
+        </div>
+        <h3 class="text-sm font-semibold text-base-content mb-1">Claims, not documents</h3>
+        <p class="text-sm text-base-content/55 leading-relaxed">
+          Documents are provenance. The atomic unit is a claim — an assertion extracted and held to account.
+        </p>
+      </div>
+
+      <div class="rounded-2xl border border-base-200 bg-base-100 p-6 hover:border-primary/30 hover:shadow-md transition-all">
+        <div class="flex h-10 w-10 items-center justify-center rounded-xl bg-primary/10 mb-4">
+          <svg
+            class="h-5 w-5 text-primary"
+            fill="none"
+            viewBox="0 0 24 24"
+            stroke="currentColor"
+            stroke-width="1.5"
+          >
+            <path
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              d="M7.5 21L3 16.5m0 0L7.5 12M3 16.5h13.5m0-13.5L21 7.5m0 0L16.5 12M21 7.5H7.5"
+            />
+          </svg>
+        </div>
+        <h3 class="text-sm font-semibold text-base-content mb-1">Friction as signal</h3>
+        <p class="text-sm text-base-content/55 leading-relaxed">
+          Contested edges, conflicting claims, and contested confidence scores are surfaced — not smoothed over.
+        </p>
+      </div>
+
+      <div class="rounded-2xl border border-base-200 bg-base-100 p-6 hover:border-primary/30 hover:shadow-md transition-all">
+        <div class="flex h-10 w-10 items-center justify-center rounded-xl bg-primary/10 mb-4">
+          <svg
+            class="h-5 w-5 text-primary"
+            fill="none"
+            viewBox="0 0 24 24"
+            stroke="currentColor"
+            stroke-width="1.5"
+          >
+            <path
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              d="M9.75 3.104v5.714a2.25 2.25 0 01-.659 1.591L5 14.5M9.75 3.104c-.251.023-.501.05-.75.082m.75-.082a24.301 24.301 0 014.5 0m0 0v5.714c0 .597.237 1.17.659 1.591L19.8 15.3M14.25 3.104c.251.023.501.05.75.082M19.8 15.3l-1.57.393A9.065 9.065 0 0112 15a9.065 9.065 0 00-6.23-.693L5 14.5m14.8.8l1.402 1.402c1.232 1.232.65 3.318-1.067 3.611A48.309 48.309 0 0112 21c-2.773 0-5.491-.235-8.135-.687-1.718-.293-2.3-2.379-1.067-3.61L5 14.5"
+            />
+          </svg>
+        </div>
+        <h3 class="text-sm font-semibold text-base-content mb-1">
+          Confidence improves through use
+        </h3>
+        <p class="text-sm text-base-content/55 leading-relaxed">
+          AI inference is provisional. Human validation accumulates over time, building a trustworthy graph.
+        </p>
+      </div>
+    </div>
+  </div>
+</Layouts.app>

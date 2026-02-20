@@ -1,0 +1,6 @@
+{
+  "dependencies": {
+    "cytoscape": "^3.33.1",
+    "cytoscape-fcose": "^2.2.0"
+  }
+}

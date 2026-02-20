@@ -1,0 +1,38 @@
+elixir%Node{
+  # Identity
+  id: uuid,
+
+  # The claim itself
+  content: text,              # the assertion, distilled
+  summary: string,            # short label for graph display
+
+  # Semantics
+  type: string,               # emergent, domain-specific
+  tags: [string],             # emergent vocabulary, multiple allowed
+  embedding: vector,          # for semantic similarity traversal
+
+  # Temporal
+  asserted_at: datetime,      # when the institution made this claim
+  extracted_at: datetime,     # when XWA captured it
+  superseded_by: uuid,        # explicit lineage when a claim evolves
+
+  # Provenance
+  source_document_id: uuid,
+  source_type: enum,          # :aspirational | :operational | :external
+  corpus_layer: enum,         # :self_description | :internal_record | :external_context
+
+  # Epistemic metadata
+  confidence: float,          # 0.0-1.0
+  ai_inferred: boolean,
+  human_validated: boolean,
+  contested: boolean,
+
+  # Audit
+  created_by: uuid,
+  validated_by: [uuid],
+  notes: text
+}
+A few things worth calling out. embedding is the one that might surprise — storing a vector alongside the claim enables semantic similarity as a traversal mechanism, not just explicit edges. Two claims might be meaningfully related without any document explicitly connecting them; semantic proximity surfaces that as candidate edges for human review. This is particularly valuable for historical ingestion where explicit connections are sparse.
+superseded_by makes claim evolution first-class. The institution's position on something changes over time — you want to be able to traverse that lineage, not just see the current state. The old claim doesn't get deleted; it becomes part of the historical record with a pointer forward.
+corpus_layer and source_type are separate because they capture different things. Corpus layer is about the nature of the source institution (internal vs external). Source type is about the intent of the document (aspirational vs operational). An external consultant's report is external corpus but might be aspirational in tone. A board minute is internal but operational.
+summary as a separate short field is important for the graph UI — content might be a paragraph, but the node needs a label that's readable at graph scale.

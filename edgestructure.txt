@@ -1,0 +1,30 @@
+%Edge{
+  # Identity
+  id: uuid,
+  from_node_id: uuid,
+  to_node_id: uuid,
+
+  # Relationship semantics
+  type: string,          # emergent, domain-specific label
+  label: string,         # human readable description
+  directed: boolean,     # some relationships are bidirectional
+
+  # Visual encoding
+  importance: float,     # 0.0-1.0, drives color
+  certainty: enum,       # :solid | :dashed | :dotted
+
+  # Epistemic metadata
+  confidence: float,     # 0.0-1.0, composite score
+  ai_inferred: boolean,
+  human_validated: boolean,
+  contested: boolean,    # divergent user judgments flagged here
+
+  # Provenance
+  source_document_ids: [uuid],   # can span multiple documents
+  established_at: datetime,       # when the relationship came into being
+  extracted_at: datetime,         # when XWA captured it
+
+  # Audit
+  created_by: uuid,
+  validated_by: [uuid],
+  notes: text            # human annotation
