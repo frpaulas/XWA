@@ -236,6 +236,8 @@ defmodule XwaWeb.SourcesLive do
     {:noreply, assign(socket, :documents, Documents.list_documents())}
   end
 
+  def handle_info(_msg, socket), do: {:noreply, socket}
+
   # ---------------------------------------------------------------------------
   # Helpers
   # ---------------------------------------------------------------------------

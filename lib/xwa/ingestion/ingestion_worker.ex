@@ -79,9 +79,9 @@ defmodule Xwa.Ingestion.IngestionWorker do
   Spawns the ingestion pipeline in a supervised Task.
   Returns the Task reference immediately.
   """
-  @spec run_async(String.t(), String.t(), String.t()) :: Task.t()
+  @spec run_async(String.t(), String.t(), String.t()) :: {:ok, pid()}
   def run_async(document_id, requesting_user_id, graph_id) do
-    Task.Supervisor.async_nolink(
+    Task.Supervisor.start_child(
       Xwa.TaskSupervisor,
       fn -> run(document_id, requesting_user_id, graph_id) end
     )
