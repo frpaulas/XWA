@@ -200,6 +200,7 @@ defmodule Xwa.Ingestion.EdgeExtractor do
   end
 
   defp model do
-    Application.get_env(:xwa, :claude_model, "claude-sonnet-4-6")
+    Application.get_env(:xwa, :claude_edge_model,
+      Application.get_env(:xwa, :claude_model, "claude-sonnet-4-6"))
   end
 end

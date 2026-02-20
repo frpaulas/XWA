@@ -12,8 +12,10 @@ import Config
 # Set ANTHROPIC_API_KEY in your environment or replace nil with a string for local dev.
 config :xwa, :anthropic_api_key, System.get_env("ANTHROPIC_API_KEY")
 
-# Claude model to use for ingestion. Override here for dev if needed.
-# config :xwa, :claude_model, "claude-haiku-4-5-20251001"
+# Claude models for ingestion. Claim extraction uses Sonnet for quality;
+# edge extraction uses Haiku (cheaper/faster — the hard semantic work is done by then).
+config :xwa, :claude_claim_model, "claude-sonnet-4-6"
+config :xwa, :claude_edge_model,  "claude-haiku-4-5-20251001"
 
 config :ueberauth, Ueberauth.Strategy.Google.OAuth,
   client_id: System.get_env("GOOGLE_CLIENT_ID"),
