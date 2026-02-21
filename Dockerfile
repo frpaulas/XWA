@@ -79,6 +79,8 @@ ENV PHX_SERVER=true
 # Only copy the final release from the build stage
 COPY --from=builder --chown=nobody:root /app/_build/${MIX_ENV}/rel/xwa ./
 
+RUN chmod +x /app/bin/migrate /app/bin/server
+
 USER nobody
 
 CMD ["/app/bin/server"]

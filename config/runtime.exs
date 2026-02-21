@@ -36,7 +36,8 @@ if config_env() == :prod do
   config :bolt_sips, Bolt,
     url: memgraph_url,
     pool_size: String.to_integer(System.get_env("BOLT_POOL_SIZE") || "10"),
-    prefix: :default
+    prefix: :default,
+    ipv6: true
 
   # Anthropic API key for claim/edge extraction
   config :xwa, :anthropic_api_key, System.get_env("ANTHROPIC_API_KEY")
