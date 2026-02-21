@@ -171,7 +171,8 @@ defmodule XwaWeb.SourcesLive do
               source_type: params["source_type"],
               corpus_layer: params["corpus_layer"],
               document_date: parse_date(params["document_date"]),
-              created_by: user_id
+              created_by: user_id,
+              graph_id: socket.assigns.current_scope.graph_id
             }
 
             content_attrs = %{
