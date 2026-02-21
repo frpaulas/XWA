@@ -495,6 +495,10 @@ defmodule XwaWeb.SourcesLive do
           <div class="flex-1 px-6 py-4 overflow-y-auto">
             <%= cond do %>
               <% @upload_step == :metadata -> %>
+                <%!-- Keep live_file_input mounted (hidden) so in-progress uploads can complete --%>
+                <form phx-change="validate_upload" class="hidden">
+                  <.live_file_input upload={@uploads.document} />
+                </form>
                 <.metadata_step form={@form} panel_mode={@panel_mode} pending_filename={@pending_filename} />
               <% @panel_mode == :write -> %>
                 <.write_step />
