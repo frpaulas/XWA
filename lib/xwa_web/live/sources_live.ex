@@ -63,18 +63,23 @@ defmodule XwaWeb.SourcesLive do
   end
 
   def handle_event("validate_upload", _params, socket) do
-    socket =
-      case socket.assigns.uploads.document.entries do
-        [entry | _] when socket.assigns.upload_step == :file ->
-          assign(socket,
-            upload_step: :metadata,
-            pending_filename: entry.client_name,
-            form: to_form(Documents.change_document(%Document{}))
-          )
-        _ ->
-          socket
-      end
+    case socket.assigns.uploads.document.entries do
+      [entry | _] when socket.assigns.upload_step == :file ->
+        send(self(), {:advance_to_metadata, entry.client_name})
+      _ ->
+        :ok
+    end
 
+    {:noreply, socket}
+  end
+
+  @impl true
+  def handle_info({:advance_to_metadata, filename}, socket) do
+    socket = assign(socket,
+      upload_step: :metadata,
+      pending_filename: filename,
+      form: to_form(Documents.change_document(%Document{}))
+    )
     {:noreply, socket}
   end
 
@@ -82,16 +87,21 @@ defmodule XwaWeb.SourcesLive do
   def handle_progress(:document, entry, socket) do
     socket =
       if entry.done? do
-        [{binary, content_type, filename}] =
+        results =
           consume_uploaded_entries(socket, :document, fn %{path: path}, e ->
             {File.read!(path), e.client_type, e.client_name}
           end)
 
-        assign(socket,
-          pending_binary: binary,
-          pending_content_type: content_type,
-          pending_filename: filename
-        )
+        case results do
+          [{binary, content_type, filename}] ->
+            assign(socket,
+              pending_binary: binary,
+              pending_content_type: content_type,
+              pending_filename: filename
+            )
+          _ ->
+            socket
+        end
       else
         socket
       end
