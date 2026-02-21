@@ -145,7 +145,7 @@ defmodule XwaWeb.SourcesLive do
     else
         content_hash = :crypto.hash(:sha256, binary) |> Base.encode16(case: :lower)
 
-        case Documents.get_document_by_hash(content_hash) do
+        case Documents.get_document_by_hash(content_hash, socket.assigns.current_scope.graph_id) do
           %Document{} = existing ->
             socket =
               socket

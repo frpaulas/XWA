@@ -116,8 +116,8 @@ defmodule Xwa.Documents do
   Finds a document by content hash. Useful for deduplication during ingestion.
   Returns nil if not found.
   """
-  def get_document_by_hash(hash) when is_binary(hash) do
-    Repo.get_by(Document, content_hash: hash)
+  def get_document_by_hash(hash, graph_id) when is_binary(hash) and is_binary(graph_id) do
+    Repo.one(from d in Document, where: d.content_hash == ^hash and d.graph_id == ^graph_id)
   end
 
   @doc """
