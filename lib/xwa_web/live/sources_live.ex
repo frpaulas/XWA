@@ -63,23 +63,6 @@ defmodule XwaWeb.SourcesLive do
   end
 
   def handle_event("validate_upload", _params, socket) do
-    case socket.assigns.uploads.document.entries do
-      [entry | _] when socket.assigns.upload_step == :file ->
-        send(self(), {:advance_to_metadata, entry.client_name})
-      _ ->
-        :ok
-    end
-
-    {:noreply, socket}
-  end
-
-  @impl true
-  def handle_info({:advance_to_metadata, filename}, socket) do
-    socket = assign(socket,
-      upload_step: :metadata,
-      pending_filename: filename,
-      form: to_form(Documents.change_document(%Document{}))
-    )
     {:noreply, socket}
   end
 
@@ -95,9 +78,11 @@ defmodule XwaWeb.SourcesLive do
         case results do
           [{binary, content_type, filename}] ->
             assign(socket,
+              upload_step: :metadata,
               pending_binary: binary,
               pending_content_type: content_type,
-              pending_filename: filename
+              pending_filename: filename,
+              form: to_form(Documents.change_document(%Document{}))
             )
           _ ->
             socket
@@ -495,10 +480,6 @@ defmodule XwaWeb.SourcesLive do
           <div class="flex-1 px-6 py-4 overflow-y-auto">
             <%= cond do %>
               <% @upload_step == :metadata -> %>
-                <%!-- Keep live_file_input mounted (hidden) so in-progress uploads can complete --%>
-                <form phx-change="validate_upload" class="hidden">
-                  <.live_file_input upload={@uploads.document} />
-                </form>
                 <.metadata_step form={@form} panel_mode={@panel_mode} pending_filename={@pending_filename} />
               <% @panel_mode == :write -> %>
                 <.write_step />
