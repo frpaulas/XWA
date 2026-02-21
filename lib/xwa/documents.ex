@@ -52,6 +52,28 @@ defmodule Xwa.Documents do
   end
 
   @doc """
+  Returns documents belonging to a specific graph, most recently inserted first.
+  """
+  def list_documents_for_graph(graph_id) when is_binary(graph_id) do
+    Repo.all(
+      from d in Document,
+        where: d.graph_id == ^graph_id,
+        order_by: [desc: d.inserted_at]
+    )
+  end
+
+  @doc """
+  Gets a document by id, only if it belongs to the given graph.
+  Returns nil if not found or not owned by the graph.
+  """
+  def get_document_for_graph(id, graph_id) do
+    Repo.one(
+      from d in Document,
+        where: d.id == ^id and d.graph_id == ^graph_id
+    )
+  end
+
+  @doc """
   Returns documents filtered by ingestion status.
   """
   def list_documents_by_status(status) when is_binary(status) do

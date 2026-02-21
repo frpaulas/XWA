@@ -22,7 +22,8 @@ defmodule XwaWeb.SourcesLive do
       if graph_id, do: Phoenix.PubSub.subscribe(Xwa.PubSub, "graph:#{graph_id}")
     end
 
-    documents = Documents.list_documents()
+    graph_id = socket.assigns.current_scope.graph_id
+    documents = if graph_id, do: Documents.list_documents_for_graph(graph_id), else: []
 
     socket =
       socket
@@ -235,21 +236,23 @@ defmodule XwaWeb.SourcesLive do
     user_id = socket.assigns.current_scope.user.id
     graph_id = socket.assigns.current_scope.graph_id
 
-    case Documents.get_document(id) do
+    case Documents.get_document_for_graph(id, graph_id) do
       nil ->
         {:noreply, put_flash(socket, :error, "Document not found.")}
 
       doc ->
         Documents.update_ingestion_status(doc, "pending")
         IngestionWorker.run_async(doc.id, user_id, graph_id)
-        {:noreply, assign(socket, :documents, Documents.list_documents())}
+        {:noreply, assign(socket, :documents, Documents.list_documents_for_graph(graph_id))}
     end
   end
 
   @impl true
   def handle_info({event, _document_id}, socket)
       when event in [:ingestion_complete, :ingestion_failed] do
-    {:noreply, assign(socket, :documents, Documents.list_documents())}
+    graph_id = socket.assigns.current_scope.graph_id
+    documents = if graph_id, do: Documents.list_documents_for_graph(graph_id), else: []
+    {:noreply, assign(socket, :documents, documents)}
   end
 
   def handle_info(_msg, socket), do: {:noreply, socket}
@@ -367,7 +370,7 @@ defmodule XwaWeb.SourcesLive do
                       <span class="text-xs text-base-content/60">{source_type_label(doc.source_type)}</span>
                     </td>
                     <td class="px-4 py-3">
-                      <div class="flex items-center gap-2">
+                      <div class="flex items-center gap-2 flex-wrap">
                         <span class={[
                           "inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium capitalize",
                           status_badge_class(doc.ingestion_status)
@@ -376,17 +379,22 @@ defmodule XwaWeb.SourcesLive do
                         </span>
                         <%= if doc.ingestion_status == "failed" do %>
                           <%= if doc.ingestion_error do %>
-                            <span title={doc.ingestion_error} class="cursor-help text-error/60 hover:text-error transition-colors">
-                              <.icon name="hero-exclamation-circle" class="w-4 h-4" />
-                            </span>
+                            <button
+                              id={"copy-error-#{doc.id}"}
+                              phx-hook="CopyToClipboard"
+                              data-clipboard={doc.ingestion_error}
+                              title="Copy error to clipboard"
+                              class="text-error/50 hover:text-error transition-all"
+                            >
+                              <.icon name="hero-clipboard-document" class="w-4 h-4" />
+                            </button>
                           <% end %>
                           <button
                             phx-click="retry_ingestion"
                             phx-value-id={doc.id}
-                            title="Retry ingestion"
-                            class="text-base-content/40 hover:text-primary transition-colors"
+                            class="inline-flex items-center gap-1 rounded-md bg-warning/15 border border-warning/30 px-2 py-0.5 text-xs font-medium text-warning-content hover:bg-warning/25 transition-colors"
                           >
-                            <.icon name="hero-arrow-path" class="w-4 h-4" />
+                            <.icon name="hero-arrow-path" class="w-3 h-3" /> Retry
                           </button>
                         <% end %>
                       </div>

@@ -8,7 +8,9 @@ defmodule XwaWeb.Endpoint do
     store: :cookie,
     key: "_xwa_key",
     signing_salt: "J8pnwCry",
-    same_site: "Lax"
+    same_site: "Lax",
+    http_only: true,
+    secure: true
   ]
 
   socket "/live", Phoenix.LiveView.Socket,

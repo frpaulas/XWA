@@ -240,6 +240,28 @@ function certaintyStyle(certainty) {
 }
 
 // ---------------------------------------------------------------------------
+// CopyToClipboard hook
+// ---------------------------------------------------------------------------
+const CopyToClipboard = {
+  mounted() {
+    this.el.addEventListener("click", () => {
+      const text = this.el.dataset.clipboard
+      if (!text) return
+      navigator.clipboard.writeText(text).then(() => {
+        const icon = this.el.querySelector("[data-copy-icon]")
+        const orig = icon ? icon.getAttribute("data-orig-name") : null
+        if (icon) {
+          icon.setAttribute("data-orig-name", icon.dataset.name || "")
+          // Show a brief "copied" cue by swapping opacity
+          this.el.style.opacity = "0.4"
+          setTimeout(() => { this.el.style.opacity = "" }, 600)
+        }
+      })
+    })
+  }
+}
+
+// ---------------------------------------------------------------------------
 // MonacoFix hook
 // ---------------------------------------------------------------------------
 // live_monaco_editor's CodeEditorHook registers onDidContentSizeChange which
@@ -268,7 +290,7 @@ const csrfToken = document.querySelector("meta[name='csrf-token']").getAttribute
 const liveSocket = new LiveSocket("/live", Socket, {
   longPollFallbackMs: 2500,
   params: {_csrf_token: csrfToken},
-  hooks: {...colocatedHooks, CytoscapeGraph, CodeEditorHook, MonacoFix},
+  hooks: {...colocatedHooks, CytoscapeGraph, CodeEditorHook, MonacoFix, CopyToClipboard},
 })
 
 // Show progress bar on live navigation and form submits
