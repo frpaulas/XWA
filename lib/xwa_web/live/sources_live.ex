@@ -495,7 +495,7 @@ defmodule XwaWeb.SourcesLive do
           <div class="flex-1 px-6 py-4 overflow-y-auto">
             <%= cond do %>
               <% @upload_step == :metadata -> %>
-                <.metadata_step form={@form} pending_upload={@pending_upload} panel_mode={@panel_mode} pending_filename={@pending_filename} />
+                <.metadata_step form={@form} panel_mode={@panel_mode} pending_filename={@pending_filename} />
               <% @panel_mode == :write -> %>
                 <.write_step />
               <% true -> %>
@@ -620,8 +620,7 @@ defmodule XwaWeb.SourcesLive do
           <p class="text-sm font-medium text-base-content">Markdown document</p>
           <p class="text-xs text-base-content/50">Written in editor</p>
         <% else %>
-          <p class="text-sm font-medium text-base-content truncate">{@pending_upload.client_name}</p>
-          <p class="text-xs text-base-content/50">{format_bytes(@pending_upload.client_size)}</p>
+          <p class="text-sm font-medium text-base-content truncate">{@pending_filename}</p>
         <% end %>
       </div>
     </div>
