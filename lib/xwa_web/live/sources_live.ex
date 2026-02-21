@@ -40,7 +40,8 @@ defmodule XwaWeb.SourcesLive do
         accept: @accepted_types,
         max_entries: 1,
         max_file_size: @max_upload_size_mb * 1_000_000,
-        auto_upload: true
+        auto_upload: true,
+        progress: &handle_progress/3
       )
 
     {:ok, socket}
@@ -66,27 +67,21 @@ defmodule XwaWeb.SourcesLive do
     {:noreply, socket}
   end
 
-  @impl true
-  def handle_progress(:document, entry, socket) do
+  defp handle_progress(:document, entry, socket) do
     socket =
-      if entry.done? do
-        results =
+      if entry.done? and entry.valid? do
+        [{binary, content_type, filename}] =
           consume_uploaded_entries(socket, :document, fn %{path: path}, e ->
             {File.read!(path), e.client_type, e.client_name}
           end)
 
-        case results do
-          [{binary, content_type, filename}] ->
-            assign(socket,
-              upload_step: :metadata,
-              pending_binary: binary,
-              pending_content_type: content_type,
-              pending_filename: filename,
-              form: to_form(Documents.change_document(%Document{}))
-            )
-          _ ->
-            socket
-        end
+        assign(socket,
+          upload_step: :metadata,
+          pending_binary: binary,
+          pending_content_type: content_type,
+          pending_filename: filename,
+          form: to_form(Documents.change_document(%Document{}))
+        )
       else
         socket
       end
