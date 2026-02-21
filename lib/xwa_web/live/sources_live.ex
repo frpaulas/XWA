@@ -62,6 +62,39 @@ defmodule XwaWeb.SourcesLive do
   end
 
   def handle_event("validate_upload", _params, socket) do
+    socket =
+      case socket.assigns.uploads.document.entries do
+        [entry | _] when socket.assigns.upload_step == :file ->
+          assign(socket,
+            upload_step: :metadata,
+            pending_filename: entry.client_name,
+            form: to_form(Documents.change_document(%Document{}))
+          )
+        _ ->
+          socket
+      end
+
+    {:noreply, socket}
+  end
+
+  @impl true
+  def handle_progress(:document, entry, socket) do
+    socket =
+      if entry.done? do
+        [{binary, content_type, filename}] =
+          consume_uploaded_entries(socket, :document, fn %{path: path}, e ->
+            {File.read!(path), e.client_type, e.client_name}
+          end)
+
+        assign(socket,
+          pending_binary: binary,
+          pending_content_type: content_type,
+          pending_filename: filename
+        )
+      else
+        socket
+      end
+
     {:noreply, socket}
   end
 
@@ -90,38 +123,6 @@ defmodule XwaWeb.SourcesLive do
     end
   end
 
-  def handle_event("proceed_to_metadata", _params, socket) do
-    case socket.assigns.uploads.document.entries do
-      [] ->
-        {:noreply, put_flash(socket, :error, "Please select a file first.")}
-
-      [entry | _] ->
-        cond do
-          not entry.valid? ->
-            {:noreply, socket}
-
-          not entry.done? ->
-            {:noreply, put_flash(socket, :error, "Upload still in progress, please wait.")}
-
-          true ->
-            # Consume the file now — the upload entry will be gone once we
-            # switch to the metadata step (file input unmounts from the DOM).
-            [{binary, content_type, filename}] =
-              consume_uploaded_entries(socket, :document, fn %{path: path}, entry ->
-                {File.read!(path), entry.client_type, entry.client_name}
-              end)
-
-            {:noreply, assign(socket,
-              upload_step: :metadata,
-              pending_upload: entry,
-              pending_binary: binary,
-              pending_content_type: content_type,
-              pending_filename: filename,
-              form: to_form(Documents.change_document(%Document{}))
-            )}
-        end
-    end
-  end
 
   def handle_event("validate_metadata", %{"document" => params}, socket) do
     form =
@@ -228,6 +229,21 @@ defmodule XwaWeb.SourcesLive do
 
   def handle_event("cancel_entry", %{"ref" => ref}, socket) do
     {:noreply, cancel_upload(socket, :document, ref)}
+  end
+
+  def handle_event("retry_ingestion", %{"id" => id}, socket) do
+    user_id = socket.assigns.current_scope.user.id
+    graph_id = socket.assigns.current_scope.graph_id
+
+    case Documents.get_document(id) do
+      nil ->
+        {:noreply, put_flash(socket, :error, "Document not found.")}
+
+      doc ->
+        Documents.update_ingestion_status(doc, "pending")
+        IngestionWorker.run_async(doc.id, user_id, graph_id)
+        {:noreply, assign(socket, :documents, Documents.list_documents())}
+    end
   end
 
   @impl true
@@ -351,12 +367,29 @@ defmodule XwaWeb.SourcesLive do
                       <span class="text-xs text-base-content/60">{source_type_label(doc.source_type)}</span>
                     </td>
                     <td class="px-4 py-3">
-                      <span class={[
-                        "inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium capitalize",
-                        status_badge_class(doc.ingestion_status)
-                      ]}>
-                        {doc.ingestion_status}
-                      </span>
+                      <div class="flex items-center gap-2">
+                        <span class={[
+                          "inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium capitalize",
+                          status_badge_class(doc.ingestion_status)
+                        ]}>
+                          {doc.ingestion_status}
+                        </span>
+                        <%= if doc.ingestion_status == "failed" do %>
+                          <%= if doc.ingestion_error do %>
+                            <span title={doc.ingestion_error} class="cursor-help text-error/60 hover:text-error transition-colors">
+                              <.icon name="hero-exclamation-circle" class="w-4 h-4" />
+                            </span>
+                          <% end %>
+                          <button
+                            phx-click="retry_ingestion"
+                            phx-value-id={doc.id}
+                            title="Retry ingestion"
+                            class="text-base-content/40 hover:text-primary transition-colors"
+                          >
+                            <.icon name="hero-arrow-path" class="w-4 h-4" />
+                          </button>
+                        <% end %>
+                      </div>
                     </td>
                   </tr>
                 <% end %>
@@ -462,12 +495,20 @@ defmodule XwaWeb.SourcesLive do
             </button>
             <%= cond do %>
               <% @upload_step == :metadata -> %>
+                <%
+                  uploading? = is_nil(@pending_binary) and @panel_mode == :upload
+                %>
                 <button
                   form="document-form"
                   type="submit"
-                  class="inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-content hover:brightness-110 active:scale-95 transition-all"
+                  disabled={uploading?}
+                  class="inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-content hover:brightness-110 active:scale-95 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
                 >
-                  <.icon name="hero-arrow-up-tray" class="w-4 h-4" /> Import
+                  <%= if uploading? do %>
+                    <span class="loading loading-spinner loading-xs"></span> Uploading…
+                  <% else %>
+                    <.icon name="hero-arrow-up-tray" class="w-4 h-4" /> Import
+                  <% end %>
                 </button>
               <% @panel_mode == :write -> %>
                 <button
@@ -477,21 +518,7 @@ defmodule XwaWeb.SourcesLive do
                   Continue <.icon name="hero-arrow-right" class="w-4 h-4" />
                 </button>
               <% true -> %>
-                <%
-                  uploading? = Enum.any?(@uploads.document.entries, &(not &1.done?))
-                  has_entry? = @uploads.document.entries != []
-                %>
-                <button
-                  phx-click="proceed_to_metadata"
-                  disabled={not has_entry? or uploading?}
-                  class="inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-content hover:brightness-110 active:scale-95 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  <%= if uploading? do %>
-                    <span class="loading loading-spinner loading-xs"></span> Uploading…
-                  <% else %>
-                    Continue <.icon name="hero-arrow-right" class="w-4 h-4" />
-                  <% end %>
-                </button>
+                <%!-- No action until a file is selected --%>
             <% end %>
           </div>
         </div>
