@@ -11,8 +11,14 @@ defmodule XwaWeb.GraphLive do
 
     {nodes, all_edges} =
       if graph_id do
-        {:ok, n} = Nodes.list(graph_id, user_id: user_id)
-        {:ok, e} = all_edges(graph_id, user_id)
+        n = case Nodes.list(graph_id, user_id: user_id) do
+          {:ok, list} -> list
+          _ -> []
+        end
+        e = case all_edges(graph_id, user_id) do
+          {:ok, list} -> list
+          _ -> []
+        end
         {n, e}
       else
         {[], []}
