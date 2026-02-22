@@ -4,6 +4,9 @@ primary_region = "iad"
 [build]
   image = "memgraph/memgraph:latest"
 
+[experimental]
+  cmd = ["--bolt-address=::"]
+
 [env]
   MEMGRAPH_BOLT_PORT = "7687"
 
