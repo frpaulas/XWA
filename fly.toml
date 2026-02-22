@@ -11,6 +11,7 @@ primary_region = "iad"
   PORT = "8080"
   ECTO_IPV6 = "true"
   ERL_AFLAGS = "-proto_dist inet6_tcp"
+  ERL_INETRC = "/app/etc/inetrc"
 
 [[services]]
   protocol = "tcp"

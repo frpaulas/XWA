@@ -39,6 +39,7 @@ if config_env() == :prod do
     prefix: :default,
     ipv6: true
 
+
   # Anthropic API key for claim/edge extraction
   config :xwa, :anthropic_api_key, System.get_env("ANTHROPIC_API_KEY")
 
