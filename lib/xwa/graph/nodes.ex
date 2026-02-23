@@ -91,7 +91,7 @@ defmodule Xwa.Graph.Nodes do
       end
 
     node_cypher = """
-    MATCH (center:Claim {id: $node_id, graph_id: $graph_id})-[:RELATES]-(nb:Claim {graph_id: $graph_id})
+    MATCH (center:Claim {id: $node_id, graph_id: $graph_id})-[:RELATES*1..2]-(nb:Claim {graph_id: $graph_id})
     WHERE 1=1
     #{node_visibility}
     RETURN DISTINCT nb AS n
@@ -101,7 +101,7 @@ defmodule Xwa.Graph.Nodes do
     """
 
     edge_cypher = """
-    MATCH (center:Claim {id: $node_id, graph_id: $graph_id})-[:RELATES]-(nb:Claim {graph_id: $graph_id})
+    MATCH (center:Claim {id: $node_id, graph_id: $graph_id})-[:RELATES*1..2]-(nb:Claim {graph_id: $graph_id})
     WITH collect(DISTINCT nb) + [center] AS hood
     UNWIND hood AS a
     UNWIND hood AS b

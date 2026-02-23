@@ -121,12 +121,13 @@ const CytoscapeGraph = {
 
     this.cy.on("mouseover", "node", (evt) => {
       const n = evt.target
+      if (n.selected()) return
       const c = resolveColors()
       n.style({
         "label": n.data("label"),
         "text-wrap": "wrap",
         "text-max-width": "200px",
-        "font-size": "22px",
+        "font-size": "12px",
         "text-valign": "bottom",
         "text-margin-y": "6px",
         "color": c.content,
@@ -142,9 +143,7 @@ const CytoscapeGraph = {
 
     this.cy.on("mouseout", "node", (evt) => {
       const n = evt.target
-      if (!n.selected()) {
-        n.style({"label": "", "z-index": 0})
-      }
+      n.style({"label": "", "z-index": 0})
     })
   },
 }
@@ -215,19 +214,12 @@ function cytoscapeStyle(c) {
     {
       selector: "node:selected",
       style: {
-        "label": "data(label)",
-        "text-wrap": "wrap",
-        "text-max-width": "200px",
-        "font-size": "11px",
-        "text-valign": "bottom",
-        "text-margin-y": "6px",
-        "color": c.content,
-        "text-background-color": c.base,
-        "text-background-opacity": 0.9,
-        "text-background-padding": "3px",
-        "border-width": 3,
-        "border-color": c.primary,
-        "background-color": c.primary,
+        "label": "",
+        "border-width": 4,
+        "border-color": "#f59e0b",
+        "background-color": "#f59e0b",
+        "width": (ele) => 18 + ele.data("confidence") * 8,
+        "height": (ele) => 18 + ele.data("confidence") * 8,
       },
     },
     {
