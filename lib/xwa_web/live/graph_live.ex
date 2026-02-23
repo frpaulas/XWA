@@ -27,6 +27,7 @@ defmodule XwaWeb.GraphLive do
     socket =
       socket
       |> assign(:selected_node, nil)
+      |> assign(:neighborhood, nil)
       |> assign(:filter_layer, "all")
       |> assign(:filter_type, "all")
       |> assign(:search, "")
@@ -65,11 +66,21 @@ defmodule XwaWeb.GraphLive do
         Map.from_struct(node) |> Map.put(:source_document, doc) |> Map.put(:edges, node_edges)
       end
 
-    {:noreply, assign(socket, selected_node: selected, confirm_delete_edge: nil)}
+    neighborhood =
+      with true <- not is_nil(socket.assigns.current_scope.graph_id),
+           graph_id = socket.assigns.current_scope.graph_id,
+           user_id = socket.assigns.current_scope.user.id,
+           {:ok, %{nodes: nbr_nodes}} <- Nodes.neighborhood(node_id, graph_id, user_id: user_id) do
+        %{center_id: node_id, ids: Enum.map(nbr_nodes, & &1.id)}
+      else
+        _ -> nil
+      end
+
+    {:noreply, assign(socket, selected_node: selected, neighborhood: neighborhood, confirm_delete_edge: nil)}
   end
 
   def handle_event("deselect", _params, socket) do
-    {:noreply, assign(socket, selected_node: nil, connect_from: nil, new_edge_modal: nil, confirm_delete_edge: nil)}
+    {:noreply, assign(socket, selected_node: nil, neighborhood: nil, connect_from: nil, new_edge_modal: nil, confirm_delete_edge: nil)}
   end
 
   def handle_event("start_connect", _params, socket) do
@@ -288,7 +299,7 @@ defmodule XwaWeb.GraphLive do
 
     ~H"""
     <Layouts.app flash={@flash} current_scope={@current_scope}>
-      <div class="flex h-[calc(100vh-4rem)] -mx-4 -my-6 overflow-hidden">
+      <div class="flex -mx-4 -my-8 overflow-hidden" style="height: calc(100vh - 4rem)">
 
         <%!-- Left sidebar: filters --%>
         <div class="w-56 shrink-0 border-r border-base-200 bg-base-100 flex flex-col overflow-y-auto">
@@ -438,6 +449,7 @@ defmodule XwaWeb.GraphLive do
 
         <%!-- Main: graph canvas --%>
         <div class="flex-1 relative bg-base-200/30">
+          <%!-- Empty state: shown via CSS when there are no nodes --%>
           <%= if @graph_data.nodes == [] do %>
             <div class="absolute inset-0 flex flex-col items-center justify-center text-center">
               <div class="flex h-12 w-12 items-center justify-center rounded-xl bg-base-200 mb-4">
@@ -446,45 +458,49 @@ defmodule XwaWeb.GraphLive do
               <p class="text-sm font-medium text-base-content/60">No claims in graph</p>
               <p class="text-xs text-base-content/40 mt-1">Import a document to get started</p>
             </div>
-          <% else %>
-            <div
-              id="cy"
-              phx-hook="CytoscapeGraph"
-              data-graph={Jason.encode!(@graph_data)}
-              data-connect-mode={to_string(!is_nil(@connect_from))}
-              class={["w-full h-full", if(@connect_from, do: "cursor-crosshair", else: "")]}
-            >
-            </div>
-            <%= if @connect_from do %>
-              <div class="absolute top-3 left-1/2 -translate-x-1/2 z-10 flex items-center gap-3 rounded-xl bg-primary px-4 py-2.5 shadow-lg">
-                <.icon name="hero-link" class="w-4 h-4 text-primary-content" />
-                <span class="text-sm font-medium text-primary-content">Click a second node to connect</span>
-                <button phx-click="cancel_connect" class="ml-1 rounded-lg bg-primary-content/20 p-1 hover:bg-primary-content/30 transition-colors">
-                  <.icon name="hero-x-mark" class="w-3.5 h-3.5 text-primary-content" />
-                </button>
-              </div>
-            <% end %>
-            <div class="absolute bottom-3 right-3 flex gap-1.5">
-              <div class="rounded-lg bg-base-100/90 border border-base-200 px-2.5 py-1 text-xs text-base-content/50 backdrop-blur-sm">
-                {@graph_data.nodes |> length()} nodes · {@graph_data.edges |> length()} edges
-              </div>
+          <% end %>
+          <%!-- Canvas: always in DOM so LiveView patches rather than replaces it --%>
+          <div
+            id="cy"
+            phx-hook="CytoscapeGraph"
+            phx-update="ignore"
+            data-graph={Jason.encode!(@graph_data)}
+            data-neighborhood={Jason.encode!(@neighborhood)}
+            class={[if(@connect_from, do: "cursor-crosshair", else: "")]}
+            style="position:absolute;top:0;right:0;bottom:0;left:0;"
+          >
+          </div>
+          <%= if @connect_from do %>
+            <div class="absolute top-3 left-1/2 -translate-x-1/2 z-10 flex items-center gap-3 rounded-xl bg-primary px-4 py-2.5 shadow-lg">
+              <.icon name="hero-link" class="w-4 h-4 text-primary-content" />
+              <span class="text-sm font-medium text-primary-content">Click a second node to connect</span>
+              <button phx-click="cancel_connect" class="ml-1 rounded-lg bg-primary-content/20 p-1 hover:bg-primary-content/30 transition-colors">
+                <.icon name="hero-x-mark" class="w-3.5 h-3.5 text-primary-content" />
+              </button>
             </div>
           <% end %>
+          <div class="absolute bottom-3 right-3 flex gap-1.5">
+            <div class="rounded-lg bg-base-100/90 border border-base-200 px-2.5 py-1 text-xs text-base-content/50 backdrop-blur-sm">
+              {@graph_data.nodes |> length()} nodes · {@graph_data.edges |> length()} edges
+            </div>
+          </div>
         </div>
 
-        <%!-- Right sidebar: node detail --%>
-        <%= if @selected_node do %>
-          <div class="w-72 shrink-0 border-l border-base-200 bg-base-100 flex flex-col overflow-y-auto">
-            <div class="flex items-center justify-between px-4 py-3 border-b border-base-200 shrink-0">
-              <h3 class="text-sm font-semibold text-base-content">Claim detail</h3>
+        <%!-- Right sidebar: node detail (always rendered so layout never shifts) --%>
+        <div class="w-72 shrink-0 border-l border-base-200 bg-base-100 flex flex-col overflow-y-auto">
+          <div class="flex items-center justify-between px-4 py-3 border-b border-base-200 shrink-0">
+            <h3 class="text-sm font-semibold text-base-content">Claim detail</h3>
+            <%= if @selected_node do %>
               <button
                 phx-click="deselect"
                 class="flex h-7 w-7 items-center justify-center rounded-lg text-base-content/40 hover:text-base-content hover:bg-base-200 transition-colors"
               >
                 <.icon name="hero-x-mark" class="w-4 h-4" />
               </button>
-            </div>
+            <% end %>
+          </div>
 
+          <%= if @selected_node do %>
             <div class="px-4 py-4 space-y-4 text-sm">
               <%!-- Type + layer badges --%>
               <div class="flex flex-wrap gap-1.5">
@@ -640,8 +656,16 @@ defmodule XwaWeb.GraphLive do
                 </button>
               </div>
             </div>
-          </div>
-        <% end %>
+          <% else %>
+            <%!-- Empty state --%>
+            <div class="flex flex-col items-center justify-center flex-1 px-4 text-center">
+              <div class="flex h-10 w-10 items-center justify-center rounded-xl bg-base-200 mb-3">
+                <.icon name="hero-cursor-arrow-rays" class="w-5 h-5 text-base-content/30" />
+              </div>
+              <p class="text-xs text-base-content/40">Click a node to see claim details</p>
+            </div>
+          <% end %>
+        </div>
 
       </div>
     </Layouts.app>

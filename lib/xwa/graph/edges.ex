@@ -408,6 +408,9 @@ defmodule Xwa.Graph.Edges do
     Graph.run("MATCH ()-[r:RELATES {id: $id}]->() DELETE r", %{id: id})
   end
 
+  @doc false
+  def from_bolt(bolt_rel), do: Edge.from_bolt(bolt_rel)
+
   # ---------------------------------------------------------------------------
   # Private helpers
   # ---------------------------------------------------------------------------

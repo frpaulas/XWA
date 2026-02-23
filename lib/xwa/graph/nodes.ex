@@ -59,6 +59,69 @@ defmodule Xwa.Graph.Nodes do
   end
 
   @doc """
+  Returns the 2-hop neighborhood of a node: the node itself, all nodes within
+  2 hops, and all edges between them. Respects visibility for the requesting user.
+
+  Returns `{:ok, %{nodes: [Node.t()], edges: [Edge.t()]}}`.
+  """
+  @spec neighborhood(String.t(), String.t(), keyword()) ::
+          {:ok, %{nodes: [Node.t()], edges: [Xwa.Graph.Edge.t()]}} | {:error, any()}
+  def neighborhood(node_id, graph_id, opts \\ []) do
+    user_id = Keyword.get(opts, :user_id)
+
+    node_visibility =
+      if user_id do
+        """
+        AND (nb.visibility = 'system' OR nb.created_by = $user_id
+          OR (nb.visibility = 'shared' AND (size(coalesce(nb.shared_with, [])) = 0 OR $user_id IN coalesce(nb.shared_with, []))))
+        """
+      else
+        ""
+      end
+
+    edge_visibility =
+      if user_id do
+        """
+        AND (r.visibility = 'system' OR r.created_by = $user_id
+          OR (r.visibility = 'shared' AND (size(coalesce(r.shared_with, [])) = 0 OR $user_id IN coalesce(r.shared_with, []))))
+        AND NOT $user_id IN coalesce(r.hidden_by, [])
+        """
+      else
+        ""
+      end
+
+    node_cypher = """
+    MATCH (center:Claim {id: $node_id, graph_id: $graph_id})-[:RELATES]-(nb:Claim {graph_id: $graph_id})
+    WHERE 1=1
+    #{node_visibility}
+    RETURN DISTINCT nb AS n
+    UNION
+    MATCH (n:Claim {id: $node_id, graph_id: $graph_id})
+    RETURN n
+    """
+
+    edge_cypher = """
+    MATCH (center:Claim {id: $node_id, graph_id: $graph_id})-[:RELATES]-(nb:Claim {graph_id: $graph_id})
+    WITH collect(DISTINCT nb) + [center] AS hood
+    UNWIND hood AS a
+    UNWIND hood AS b
+    MATCH (a)-[r:RELATES]->(b)
+    WHERE r.graph_id = $graph_id
+    #{edge_visibility}
+    RETURN DISTINCT r
+    """
+
+    params = %{node_id: node_id, graph_id: graph_id, user_id: user_id}
+
+    with {:ok, node_rows} <- Graph.query(node_cypher, params),
+         {:ok, edge_rows} <- Graph.query(edge_cypher, params) do
+      nodes = Enum.map(node_rows, &node_from_row/1)
+      edges = Enum.map(edge_rows, &Xwa.Graph.Edges.from_bolt(&1["r"]))
+      {:ok, %{nodes: nodes, edges: edges}}
+    end
+  end
+
+  @doc """
   Finds a Claim node by its UUID.
   Returns `{:ok, node}` or `{:ok, nil}` if not found.
   """

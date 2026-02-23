@@ -35,35 +35,79 @@ cytoscape.use(fcose)
 // ---------------------------------------------------------------------------
 const CytoscapeGraph = {
   mounted() {
+    this._layoutDone = false
+    this._prevNeighborhoodJson = null
+    // Mount Cytoscape on a stable child div, not this.el directly.
+    // LiveView patches this.el's attributes on updates but never touches its children,
+    // so the canvas elements survive across LiveView re-renders.
+    this._cyContainer = document.createElement("div")
+    this._cyContainer.style.cssText = "position:absolute;top:0;right:0;bottom:0;left:0;"
+    this.el.appendChild(this._cyContainer)
     this.initCy(JSON.parse(this.el.dataset.graph))
   },
 
   updated() {
-    const data = JSON.parse(this.el.dataset.graph)
-    if (this.cy) {
-      const colors = resolveColors()
-      this.cy.setStyle(cytoscapeStyle(colors))
-      this.cy.elements().remove()
-      this.cy.add(data.nodes)
-      this.cy.add(data.edges)
-      this.cy.layout(layoutConfig()).run()
+    if (!this.cy) return
+
+    const neighborhoodJson = this.el.dataset.neighborhood
+    if (neighborhoodJson && neighborhoodJson !== "null") {
+      if (neighborhoodJson !== this._prevNeighborhoodJson) {
+        this._prevNeighborhoodJson = neighborhoodJson
+        const {center_id, ids} = JSON.parse(neighborhoodJson)
+        const hoodSet = new Set(ids)
+        hoodSet.add(center_id)
+        this._applyNeighborhood(hoodSet)
+      }
+    } else {
+      if (this._prevNeighborhoodJson !== null) {
+        this._prevNeighborhoodJson = null
+        this.cy.elements().style({opacity: 1})
+        this.cy.fit(undefined, 60)
+      }
     }
   },
 
   destroyed() {
+    if (this._resizeObserver) this._resizeObserver.disconnect()
     if (this.cy) this.cy.destroy()
+  },
+
+  _applyNeighborhood(hoodSet) {
+    this.cy.nodes().forEach(n => {
+      n.style({opacity: hoodSet.has(n.id()) ? 1 : 0.15})
+    })
+    this.cy.edges().forEach(e => {
+      const inHood = hoodSet.has(e.source().id()) && hoodSet.has(e.target().id())
+      e.style({opacity: inHood ? 1 : 0.1})
+    })
+    const hoodEles = this.cy.elements().filter(ele => {
+      if (ele.isNode()) return hoodSet.has(ele.id())
+      return hoodSet.has(ele.source().id()) && hoodSet.has(ele.target().id())
+    })
+    if (hoodEles.length) this.cy.fit(hoodEles, 60)
   },
 
   initCy(data) {
     const colors = resolveColors()
     this.cy = cytoscape({
-      container: this.el,
+      container: this._cyContainer,
       elements: [...data.nodes, ...data.edges],
       style: cytoscapeStyle(colors),
-      layout: layoutConfig(),
-      minZoom: 0.1,
-      maxZoom: 0.8,
+      layout: {name: "preset"},
+      minZoom: 0.05,
+      maxZoom: 3,
     })
+
+    // Delay layout until after the browser has painted and the container has
+    // its real dimensions (the canvas can start at height 0 during LiveView mount).
+    setTimeout(() => {
+      this.cy.resize()
+      this.cy.layout(layoutConfig()).run()
+      this.cy.one("layoutstop", () => { this._layoutDone = true })
+    }, 50)
+
+    this._resizeObserver = new ResizeObserver(() => this.cy.resize())
+    this._resizeObserver.observe(this.el)
 
     this.cy.on("tap", "node", (evt) => {
       this.pushEvent("node_selected", {id: evt.target.id()})
@@ -77,6 +121,7 @@ const CytoscapeGraph = {
 
     this.cy.on("mouseover", "node", (evt) => {
       const n = evt.target
+      const c = resolveColors()
       n.style({
         "label": n.data("label"),
         "text-wrap": "wrap",
@@ -84,7 +129,7 @@ const CytoscapeGraph = {
         "font-size": "22px",
         "text-valign": "bottom",
         "text-margin-y": "6px",
-        "color": colors.content,
+        "color": c.content,
         "text-background-color": "#fefce8",
         "text-background-opacity": 1,
         "text-background-padding": "4px",
@@ -98,10 +143,7 @@ const CytoscapeGraph = {
     this.cy.on("mouseout", "node", (evt) => {
       const n = evt.target
       if (!n.selected()) {
-        n.style({
-          "label": "",
-          "z-index": 0,
-        })
+        n.style({"label": "", "z-index": 0})
       }
     })
   },

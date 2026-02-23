@@ -37,7 +37,7 @@ if config_env() == :prod do
     url: memgraph_url,
     pool_size: String.to_integer(System.get_env("BOLT_POOL_SIZE") || "10"),
     prefix: :default,
-    ipv6: true
+    socket: Xwa.BoltIPv6Socket
 
 
   # Anthropic API key for claim/edge extraction
