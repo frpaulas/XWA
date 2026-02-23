@@ -65,7 +65,7 @@ const CytoscapeGraph = {
       if (this._prevFocusJson !== null) {
         this._prevFocusJson = null
         this.cy.elements().unselect()
-        this.cy.elements().removeStyle("opacity background-color border-color border-width")
+        this.cy.elements().removeStyle("opacity display background-color border-color border-width")
         this.cy.fit(undefined, 60)
       }
     }
@@ -87,7 +87,7 @@ const CytoscapeGraph = {
       if (this._prevNeighborhoodJson !== null) {
         this._prevNeighborhoodJson = null
         this.cy.elements().unselect()
-        this.cy.elements().style({opacity: 1})
+        this.cy.elements().style({display: "element"})
         this.cy.fit(undefined, 60)
       }
     }
@@ -100,11 +100,11 @@ const CytoscapeGraph = {
 
   _applyNeighborhood(hoodSet) {
     this.cy.nodes().forEach(n => {
-      n.style({opacity: hoodSet.has(n.id()) ? 1 : 0.15})
+      n.style({display: hoodSet.has(n.id()) ? "element" : "none"})
     })
     this.cy.edges().forEach(e => {
       const inHood = hoodSet.has(e.source().id()) && hoodSet.has(e.target().id())
-      e.style({opacity: inHood ? 1 : 0.1})
+      e.style({display: inHood ? "element" : "none"})
     })
     const hoodEles = this.cy.elements().filter(ele => {
       if (ele.isNode()) return hoodSet.has(ele.id())
