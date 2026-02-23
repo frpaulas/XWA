@@ -1,7 +1,7 @@
 defmodule XwaWeb.GraphLive do
   use XwaWeb, :live_view
 
-  alias Xwa.Graph.{Nodes, Edges}
+  alias Xwa.Graph.{Nodes, Edges, FocusScorer}
   alias Xwa.Documents
 
   @impl true
@@ -37,6 +37,10 @@ defmodule XwaWeb.GraphLive do
       |> assign(:connect_from, nil)
       |> assign(:new_edge_modal, nil)
       |> assign(:confirm_delete_edge, nil)
+      |> assign(:focus_mode, false)
+      |> assign(:focus_prompt, "")
+      |> assign(:focus_loading, false)
+      |> assign(:focus_neighborhoods, nil)
 
     {:ok, socket}
   end
@@ -76,11 +80,71 @@ defmodule XwaWeb.GraphLive do
         _ -> nil
       end
 
+    socket =
+      if socket.assigns.focus_mode do
+        assign(socket, focus_mode: false, focus_neighborhoods: nil, focus_loading: false)
+      else
+        socket
+      end
+
     {:noreply, assign(socket, selected_node: selected, neighborhood: neighborhood, confirm_delete_edge: nil)}
   end
 
   def handle_event("deselect", _params, socket) do
     {:noreply, assign(socket, selected_node: nil, neighborhood: nil, connect_from: nil, new_edge_modal: nil, confirm_delete_edge: nil)}
+  end
+
+  def handle_event("enter_focus_mode", _params, socket) do
+    {:noreply, assign(socket, focus_mode: true, focus_prompt: "", focus_loading: false, focus_neighborhoods: nil)}
+  end
+
+  def handle_event("exit_focus_mode", _params, socket) do
+    {:noreply, assign(socket, focus_mode: false, focus_loading: false, focus_neighborhoods: nil, selected_node: nil, neighborhood: nil)}
+  end
+
+  def handle_event("focus_submit", %{"prompt" => prompt}, socket) when prompt != "" do
+    send(self(), {:run_focus, String.trim(prompt)})
+    {:noreply, assign(socket, focus_loading: true, focus_prompt: prompt, focus_neighborhoods: nil)}
+  end
+
+  def handle_event("focus_submit", _params, socket) do
+    {:noreply, socket}
+  end
+
+  @impl true
+  def handle_info({:run_focus, prompt}, socket) do
+    graph_id = socket.assigns.current_scope.graph_id
+    user_id = socket.assigns.current_scope.user.id
+    nodes = socket.assigns.nodes
+
+    node_summaries = Enum.map(nodes, fn n ->
+      %{id: n.id, summary: n.summary || n.content || ""}
+    end)
+
+    neighborhoods =
+      with {:ok, top_ids} when top_ids != [] <- FocusScorer.score(prompt, node_summaries),
+           top_ids = Enum.take(top_ids, 3) do
+        top_ids
+        |> Task.async_stream(
+          fn node_id ->
+            case Nodes.neighborhood(node_id, graph_id, user_id: user_id) do
+              {:ok, %{nodes: nb_nodes}} ->
+                %{center_id: node_id, ids: Enum.map(nb_nodes, & &1.id)}
+              _ ->
+                nil
+            end
+          end,
+          timeout: 15_000
+        )
+        |> Enum.flat_map(fn
+          {:ok, result} when not is_nil(result) -> [result]
+          _ -> []
+        end)
+      else
+        _ -> []
+      end
+
+    {:noreply, assign(socket, focus_loading: false, focus_neighborhoods: neighborhoods)}
   end
 
   def handle_event("start_connect", _params, socket) do
@@ -303,6 +367,45 @@ defmodule XwaWeb.GraphLive do
 
         <%!-- Left sidebar: filters --%>
         <div class="w-56 shrink-0 border-r border-base-200 bg-base-100 flex flex-col overflow-y-auto">
+
+          <%!-- Focus mode panel --%>
+          <div class="px-4 py-3 border-b border-base-200">
+            <%= if @focus_mode do %>
+              <div class="space-y-2">
+                <div class="flex items-center justify-between">
+                  <p class="text-xs font-semibold text-primary">Focus mode</p>
+                  <button phx-click="exit_focus_mode" class="text-xs text-base-content/40 hover:text-base-content transition-colors">
+                    Exit
+                  </button>
+                </div>
+                <form phx-submit="focus_submit">
+                  <textarea
+                    name="prompt"
+                    rows="3"
+                    placeholder="What are you working on?"
+                    class="w-full rounded-lg border border-base-300 bg-base-200/50 px-2.5 py-2 text-xs resize-none focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary"
+                    disabled={@focus_loading}
+                  ></textarea>
+                  <button
+                    type="submit"
+                    disabled={@focus_loading}
+                    class="mt-1.5 w-full rounded-lg bg-primary px-3 py-1.5 text-xs font-medium text-primary-content hover:brightness-110 disabled:opacity-50 transition-all"
+                  >
+                    <%= if @focus_loading, do: "Finding…", else: "Find relevant areas" %>
+                  </button>
+                </form>
+              </div>
+            <% else %>
+              <button
+                phx-click="enter_focus_mode"
+                class="w-full flex items-center gap-2 rounded-lg border border-base-300 px-2.5 py-2 text-xs text-base-content/60 hover:bg-base-200 hover:text-base-content transition-colors"
+              >
+                <.icon name="hero-viewfinder-circle" class="w-3.5 h-3.5" />
+                Focus mode
+              </button>
+            <% end %>
+          </div>
+
           <div class="px-4 py-4 border-b border-base-200">
             <h2 class="text-xs font-semibold uppercase tracking-wider text-base-content/50 mb-3">Filter</h2>
 
@@ -466,6 +569,7 @@ defmodule XwaWeb.GraphLive do
             phx-update="ignore"
             data-graph={Jason.encode!(@graph_data)}
             data-neighborhood={Jason.encode!(@neighborhood)}
+            data-focus={Jason.encode!(@focus_neighborhoods)}
             class={[if(@connect_from, do: "cursor-crosshair", else: "")]}
             style="position:absolute;top:0;right:0;bottom:0;left:0;"
           >
@@ -480,6 +584,11 @@ defmodule XwaWeb.GraphLive do
             </div>
           <% end %>
           <div class="absolute bottom-3 right-3 flex gap-1.5">
+            <%= if @focus_mode and @focus_neighborhoods && @focus_neighborhoods != [] do %>
+              <div class="rounded-lg bg-primary/10 border border-primary/20 px-2.5 py-1 text-xs text-primary backdrop-blur-sm">
+                Focus: {length(@focus_neighborhoods)} neighborhoods
+              </div>
+            <% end %>
             <div class="rounded-lg bg-base-100/90 border border-base-200 px-2.5 py-1 text-xs text-base-content/50 backdrop-blur-sm">
               {@graph_data.nodes |> length()} nodes · {@graph_data.edges |> length()} edges
             </div>

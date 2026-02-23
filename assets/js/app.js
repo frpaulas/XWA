@@ -37,6 +37,7 @@ const CytoscapeGraph = {
   mounted() {
     this._layoutDone = false
     this._prevNeighborhoodJson = null
+    this._prevFocusJson = null
     // Mount Cytoscape on a stable child div, not this.el directly.
     // LiveView patches this.el's attributes on updates but never touches its children,
     // so the canvas elements survive across LiveView re-renders.
@@ -48,6 +49,24 @@ const CytoscapeGraph = {
 
   updated() {
     if (!this.cy) return
+
+    // Focus mode takes priority over neighborhood highlighting
+    const focusJson = this.el.dataset.focus
+    if (focusJson && focusJson !== "null") {
+      if (focusJson !== this._prevFocusJson) {
+        this._prevFocusJson = focusJson
+        this._prevNeighborhoodJson = null
+        this._applyFocusMode(JSON.parse(focusJson))
+      }
+      return
+    } else {
+      // Focus cleared — restore all opacities before handling neighborhood
+      if (this._prevFocusJson !== null) {
+        this._prevFocusJson = null
+        this.cy.elements().removeStyle("opacity background-color border-color border-width")
+        this.cy.fit(undefined, 60)
+      }
+    }
 
     const neighborhoodJson = this.el.dataset.neighborhood
     if (neighborhoodJson && neighborhoodJson !== "null") {
@@ -83,6 +102,39 @@ const CytoscapeGraph = {
     const hoodEles = this.cy.elements().filter(ele => {
       if (ele.isNode()) return hoodSet.has(ele.id())
       return hoodSet.has(ele.source().id()) && hoodSet.has(ele.target().id())
+    })
+    if (hoodEles.length) this.cy.fit(hoodEles, 60)
+  },
+
+  _applyFocusMode(neighborhoods) {
+    const centerIds = new Set(neighborhoods.map(h => h.center_id))
+    const allHoodIds = new Set()
+    neighborhoods.forEach(h => {
+      allHoodIds.add(h.center_id)
+      h.ids.forEach(id => allHoodIds.add(id))
+    })
+
+    // Dim everything outside focus neighborhoods
+    this.cy.nodes().forEach(n => {
+      n.style({opacity: allHoodIds.has(n.id()) ? 1 : 0.08})
+    })
+    this.cy.edges().forEach(e => {
+      const inHood = allHoodIds.has(e.source().id()) && allHoodIds.has(e.target().id())
+      e.style({opacity: inHood ? 1 : 0.05})
+    })
+
+    // Highlight center nodes in violet to distinguish them
+    centerIds.forEach(id => {
+      const n = this.cy.getElementById(id)
+      if (n.length) {
+        n.style({"background-color": "#8b5cf6", "border-color": "#8b5cf6", "border-width": 3})
+      }
+    })
+
+    // Fit view to the focus area
+    const hoodEles = this.cy.elements().filter(ele => {
+      if (ele.isNode()) return allHoodIds.has(ele.id())
+      return allHoodIds.has(ele.source().id()) && allHoodIds.has(ele.target().id())
     })
     if (hoodEles.length) this.cy.fit(hoodEles, 60)
   },
