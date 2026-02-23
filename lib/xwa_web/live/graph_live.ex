@@ -41,6 +41,8 @@ defmodule XwaWeb.GraphLive do
       |> assign(:focus_prompt, "")
       |> assign(:focus_loading, false)
       |> assign(:focus_neighborhoods, nil)
+      |> assign(:focus_history, [])
+      |> assign(:selection_history, [])
 
     {:ok, socket}
   end
@@ -80,18 +82,59 @@ defmodule XwaWeb.GraphLive do
         _ -> nil
       end
 
-    socket =
-      if socket.assigns.focus_mode do
-        assign(socket, focus_mode: false, focus_neighborhoods: nil, focus_loading: false)
-      else
-        socket
-      end
+    # Double-tap: pop focus history or selection history
+    already_selected = match?(%{id: ^node_id}, socket.assigns.selected_node)
+    cond do
+      already_selected and socket.assigns.focus_history != [] ->
+        handle_event("focus_back", %{}, socket)
 
-    {:noreply, assign(socket, selected_node: selected, neighborhood: neighborhood, confirm_delete_edge: nil)}
+      already_selected ->
+        # Restore previous selection, or clear if none
+        case socket.assigns.selection_history do
+          [%{selected_node: prev_node, neighborhood: prev_neighborhood} | rest] ->
+            {:noreply, assign(socket,
+              selected_node: prev_node,
+              neighborhood: prev_neighborhood,
+              selection_history: rest,
+              confirm_delete_edge: nil
+            )}
+          [] ->
+            {:noreply, assign(socket, selected_node: nil, neighborhood: nil, selection_history: [])}
+        end
+
+      true ->
+        # Push current selection onto history before switching to new node
+        selection_history =
+          if socket.assigns.selected_node do
+            [%{selected_node: socket.assigns.selected_node, neighborhood: socket.assigns.neighborhood}
+             | socket.assigns.selection_history]
+          else
+            socket.assigns.selection_history
+          end
+
+        socket =
+          if socket.assigns.focus_mode and socket.assigns.focus_neighborhoods not in [nil, []] do
+            history_entry = %{prompt: socket.assigns.focus_prompt, neighborhoods: socket.assigns.focus_neighborhoods}
+            assign(socket,
+              focus_neighborhoods: nil,
+              focus_loading: false,
+              focus_history: [history_entry | socket.assigns.focus_history]
+            )
+          else
+            socket
+          end
+
+        {:noreply, assign(socket,
+          selected_node: selected,
+          neighborhood: neighborhood,
+          selection_history: selection_history,
+          confirm_delete_edge: nil
+        )}
+    end
   end
 
   def handle_event("deselect", _params, socket) do
-    {:noreply, assign(socket, selected_node: nil, neighborhood: nil, connect_from: nil, new_edge_modal: nil, confirm_delete_edge: nil)}
+    {:noreply, assign(socket, selected_node: nil, neighborhood: nil, connect_from: nil, new_edge_modal: nil, confirm_delete_edge: nil, selection_history: [])}
   end
 
   def handle_event("enter_focus_mode", _params, socket) do
@@ -99,7 +142,24 @@ defmodule XwaWeb.GraphLive do
   end
 
   def handle_event("exit_focus_mode", _params, socket) do
-    {:noreply, assign(socket, focus_mode: false, focus_loading: false, focus_neighborhoods: nil, selected_node: nil, neighborhood: nil)}
+    {:noreply, assign(socket, focus_mode: false, focus_loading: false, focus_neighborhoods: nil, selected_node: nil, neighborhood: nil, focus_history: [], selection_history: [])}
+  end
+
+  def handle_event("focus_back", _params, socket) do
+    case socket.assigns.focus_history do
+      [%{prompt: prompt, neighborhoods: neighborhoods} | rest] ->
+        {:noreply, assign(socket,
+          focus_mode: true,
+          focus_prompt: prompt,
+          focus_neighborhoods: neighborhoods,
+          focus_loading: false,
+          focus_history: rest,
+          selected_node: nil,
+          neighborhood: nil
+        )}
+      [] ->
+        {:noreply, assign(socket, focus_mode: false, focus_neighborhoods: nil)}
+    end
   end
 
   def handle_event("focus_submit", %{"prompt" => prompt}, socket) when prompt != "" do
@@ -368,42 +428,21 @@ defmodule XwaWeb.GraphLive do
         <%!-- Left sidebar: filters --%>
         <div class="w-56 shrink-0 border-r border-base-200 bg-base-100 flex flex-col overflow-y-auto">
 
-          <%!-- Focus mode panel --%>
+          <%!-- Focus button --%>
           <div class="px-4 py-3 border-b border-base-200">
-            <%= if @focus_mode do %>
-              <div class="space-y-2">
-                <div class="flex items-center justify-between">
-                  <p class="text-xs font-semibold text-primary">Focus mode</p>
-                  <button phx-click="exit_focus_mode" class="text-xs text-base-content/40 hover:text-base-content transition-colors">
-                    Exit
-                  </button>
-                </div>
-                <form phx-submit="focus_submit">
-                  <textarea
-                    name="prompt"
-                    rows="3"
-                    placeholder="What are you working on?"
-                    class="w-full rounded-lg border border-base-300 bg-base-200/50 px-2.5 py-2 text-xs resize-none focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary"
-                    disabled={@focus_loading}
-                  ></textarea>
-                  <button
-                    type="submit"
-                    disabled={@focus_loading}
-                    class="mt-1.5 w-full rounded-lg bg-primary px-3 py-1.5 text-xs font-medium text-primary-content hover:brightness-110 disabled:opacity-50 transition-all"
-                  >
-                    <%= if @focus_loading, do: "Finding…", else: "Find relevant areas" %>
-                  </button>
-                </form>
-              </div>
-            <% else %>
-              <button
-                phx-click="enter_focus_mode"
-                class="w-full flex items-center gap-2 rounded-lg border border-base-300 px-2.5 py-2 text-xs text-base-content/60 hover:bg-base-200 hover:text-base-content transition-colors"
-              >
-                <.icon name="hero-viewfinder-circle" class="w-3.5 h-3.5" />
-                Focus mode
-              </button>
-            <% end %>
+            <button
+              phx-click="enter_focus_mode"
+              class={[
+                "w-full flex items-center gap-2 rounded-lg border px-2.5 py-2 text-xs transition-colors",
+                if(@focus_mode,
+                  do: "border-primary/40 bg-primary/10 text-primary font-medium",
+                  else: "border-base-300 text-base-content/60 hover:bg-base-200 hover:text-base-content"
+                )
+              ]}
+            >
+              <.icon name="hero-viewfinder-circle" class="w-3.5 h-3.5" />
+              Focus
+            </button>
           </div>
 
           <div class="px-4 py-4 border-b border-base-200">
@@ -574,6 +613,60 @@ defmodule XwaWeb.GraphLive do
             style="position:absolute;top:0;right:0;bottom:0;left:0;"
           >
           </div>
+          <%!-- Focus overlay: input panel or breadcrumb bar --%>
+          <%= if @focus_mode do %>
+            <div class="absolute top-3 left-1/2 -translate-x-1/2 z-20 w-80 rounded-xl bg-base-100/95 border border-base-200 shadow-xl backdrop-blur-sm p-3">
+              <%= if @focus_neighborhoods == nil or @focus_neighborhoods == [] do %>
+                <%!-- Input state --%>
+                <div class="flex items-center justify-between mb-2">
+                  <span class="text-xs font-semibold text-primary flex items-center gap-1.5">
+                    <.icon name="hero-viewfinder-circle" class="w-3.5 h-3.5" /> Focus
+                  </span>
+                  <button phx-click="exit_focus_mode" class="text-base-content/30 hover:text-base-content transition-colors">
+                    <.icon name="hero-x-mark" class="w-4 h-4" />
+                  </button>
+                </div>
+                <form phx-submit="focus_submit" class="flex flex-col gap-2">
+                  <textarea
+                    name="prompt"
+                    rows="2"
+                    placeholder="What are you working on?"
+                    autofocus
+                    class="w-full rounded-lg border border-base-300 bg-base-200/50 px-2.5 py-2 text-xs resize-none focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary"
+                    disabled={@focus_loading}
+                  ></textarea>
+                  <button
+                    type="submit"
+                    disabled={@focus_loading}
+                    class="w-full rounded-lg bg-primary px-3 py-1.5 text-xs font-medium text-primary-content hover:brightness-110 disabled:opacity-50 transition-all"
+                  >
+                    <%= if @focus_loading, do: "Finding…", else: "Find relevant areas" %>
+                  </button>
+                </form>
+              <% else %>
+                <%!-- Active focus: breadcrumb bar --%>
+                <div class="flex items-center gap-2">
+                  <.icon name="hero-viewfinder-circle" class="w-3.5 h-3.5 text-primary shrink-0" />
+                  <p class="flex-1 text-xs text-base-content/70 truncate">{@focus_prompt}</p>
+                  <%= if @focus_history != [] do %>
+                    <button
+                      phx-click="focus_back"
+                      class="shrink-0 flex items-center gap-1 text-xs text-base-content/50 hover:text-base-content transition-colors"
+                      title="Back to previous focus"
+                    >
+                      <.icon name="hero-arrow-left" class="w-3 h-3" />
+                      Back
+                    </button>
+                  <% end %>
+                  <button phx-click="exit_focus_mode" class="shrink-0 text-base-content/30 hover:text-base-content transition-colors">
+                    <.icon name="hero-x-mark" class="w-4 h-4" />
+                  </button>
+                </div>
+              <% end %>
+            </div>
+          <% end %>
+
+          <%!-- Connect banner --%>
           <%= if @connect_from do %>
             <div class="absolute top-3 left-1/2 -translate-x-1/2 z-10 flex items-center gap-3 rounded-xl bg-primary px-4 py-2.5 shadow-lg">
               <.icon name="hero-link" class="w-4 h-4 text-primary-content" />
@@ -584,11 +677,6 @@ defmodule XwaWeb.GraphLive do
             </div>
           <% end %>
           <div class="absolute bottom-3 right-3 flex gap-1.5">
-            <%= if @focus_mode and @focus_neighborhoods && @focus_neighborhoods != [] do %>
-              <div class="rounded-lg bg-primary/10 border border-primary/20 px-2.5 py-1 text-xs text-primary backdrop-blur-sm">
-                Focus: {length(@focus_neighborhoods)} neighborhoods
-              </div>
-            <% end %>
             <div class="rounded-lg bg-base-100/90 border border-base-200 px-2.5 py-1 text-xs text-base-content/50 backdrop-blur-sm">
               {@graph_data.nodes |> length()} nodes · {@graph_data.edges |> length()} edges
             </div>

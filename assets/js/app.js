@@ -76,10 +76,15 @@ const CytoscapeGraph = {
         const hoodSet = new Set(ids)
         hoodSet.add(center_id)
         this._applyNeighborhood(hoodSet)
+        // Sync Cytoscape selection to the center node
+        this.cy.elements().unselect()
+        const centerNode = this.cy.getElementById(center_id)
+        if (centerNode.length) centerNode.select()
       }
     } else {
       if (this._prevNeighborhoodJson !== null) {
         this._prevNeighborhoodJson = null
+        this.cy.elements().unselect()
         this.cy.elements().style({opacity: 1})
         this.cy.fit(undefined, 60)
       }
@@ -173,7 +178,6 @@ const CytoscapeGraph = {
 
     this.cy.on("mouseover", "node", (evt) => {
       const n = evt.target
-      if (n.selected()) return
       const c = resolveColors()
       n.style({
         "label": n.data("label"),
