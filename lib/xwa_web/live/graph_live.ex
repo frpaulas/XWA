@@ -43,6 +43,9 @@ defmodule XwaWeb.GraphLive do
       |> assign(:focus_neighborhoods, nil)
       |> assign(:focus_history, [])
       |> assign(:selection_history, [])
+      |> assign(:explore_tab, :focus)
+      |> assign(:explore_slider, 50)
+      |> assign(:explore_loading, false)
 
     {:ok, socket}
   end
@@ -143,7 +146,7 @@ defmodule XwaWeb.GraphLive do
   end
 
   def handle_event("exit_focus_mode", _params, socket) do
-    {:noreply, assign(socket, focus_mode: false, focus_loading: false, focus_neighborhoods: nil, selected_node: nil, neighborhood: nil, focus_history: [], selection_history: [])}
+    {:noreply, assign(socket, focus_mode: false, focus_loading: false, focus_neighborhoods: nil, selected_node: nil, neighborhood: nil, focus_history: [], selection_history: [], explore_tab: :focus, explore_slider: 50, explore_loading: false)}
   end
 
   def handle_event("focus_back", _params, socket) do
@@ -170,6 +173,17 @@ defmodule XwaWeb.GraphLive do
 
   def handle_event("focus_submit", _params, socket) do
     {:noreply, socket}
+  end
+
+  def handle_event("set_explore_tab", %{"tab" => tab}, socket) do
+    tab = if tab == "explore", do: :explore, else: :focus
+    {:noreply, assign(socket, explore_tab: tab)}
+  end
+
+  def handle_event("explore_submit", %{"slider" => slider_str}, socket) do
+    slider = String.to_integer(slider_str)
+    send(self(), {:run_explore, slider})
+    {:noreply, assign(socket, explore_loading: true, explore_slider: slider, focus_neighborhoods: nil)}
   end
 
   @impl true
@@ -206,6 +220,60 @@ defmodule XwaWeb.GraphLive do
       end
 
     {:noreply, assign(socket, focus_loading: false, focus_neighborhoods: neighborhoods)}
+  end
+
+  def handle_info({:run_explore, slider}, socket) do
+    nodes = socket.assigns.nodes
+    all_edges = socket.assigns.all_edges
+    graph_id = socket.assigns.current_scope.graph_id
+    user_id = socket.assigns.current_scope.user.id
+
+    edge_counts =
+      Enum.reduce(all_edges, %{}, fn e, acc ->
+        acc
+        |> Map.update(e.from_node_id, 1, &(&1 + 1))
+        |> Map.update(e.to_node_id, 1, &(&1 + 1))
+      end)
+
+    top_ids =
+      if slider == -1 do
+        nodes
+        |> Enum.filter(&(Map.get(edge_counts, &1.id, 0) == 0))
+        |> Enum.shuffle()
+        |> Enum.take(3)
+        |> Enum.map(& &1.id)
+      else
+        sorted = Enum.sort_by(nodes, &Map.get(edge_counts, &1.id, 0))
+        total = length(sorted)
+        target_idx = round(slider / 100 * (total - 1))
+        target_count = Map.get(edge_counts, Enum.at(sorted, target_idx).id, 0)
+        sorted
+        |> Enum.sort_by(&abs(Map.get(edge_counts, &1.id, 0) - target_count))
+        |> Enum.take(9)
+        |> Enum.shuffle()
+        |> Enum.take(3)
+        |> Enum.map(& &1.id)
+      end
+
+    neighborhoods =
+      top_ids
+      |> Task.async_stream(
+        fn node_id ->
+          case Nodes.neighborhood(node_id, graph_id, user_id: user_id) do
+            {:ok, %{nodes: nb_nodes}} ->
+              %{center_id: node_id, ids: Enum.map(nb_nodes, & &1.id)}
+            _ ->
+              %{center_id: node_id, ids: []}
+          end
+        end,
+        timeout: 15_000
+      )
+      |> Enum.flat_map(fn
+        {:ok, result} -> [result]
+        _ -> []
+      end)
+
+    {:noreply, assign(socket, explore_loading: false, focus_neighborhoods: neighborhoods, focus_mode: true)}
   end
 
   def handle_event("start_connect", _params, socket) do
@@ -614,56 +682,80 @@ defmodule XwaWeb.GraphLive do
             style="position:absolute;top:0;right:0;bottom:0;left:0;"
           >
           </div>
-          <%!-- Focus overlay: input panel or breadcrumb bar --%>
+          <%!-- Focus/Explore overlay --%>
           <%= if @focus_mode do %>
-            <div class="absolute top-3 left-1/2 -translate-x-1/2 z-20 w-80 rounded-xl bg-base-100/95 border border-base-200 shadow-xl backdrop-blur-sm p-3">
-              <%= if @focus_neighborhoods == nil or @focus_neighborhoods == [] do %>
-                <%!-- Input state --%>
-                <div class="flex items-center justify-between mb-2">
-                  <span class="text-xs font-semibold text-primary flex items-center gap-1.5">
-                    <.icon name="hero-viewfinder-circle" class="w-3.5 h-3.5" /> Focus
-                  </span>
-                  <button phx-click="exit_focus_mode" class="text-base-content/30 hover:text-base-content transition-colors">
-                    <.icon name="hero-x-mark" class="w-4 h-4" />
+            <div class="absolute top-3 left-1/2 -translate-x-1/2 z-20 w-80 rounded-xl bg-base-100/95 border border-base-200 shadow-xl backdrop-blur-sm">
+              <%!-- Tab bar: only shown in input state --%>
+              <%= if @focus_neighborhoods in [nil, []] do %>
+                <div class="flex border-b border-base-200">
+                  <button phx-click="set_explore_tab" phx-value-tab="focus"
+                    class={["flex-1 py-2 text-xs font-medium transition-colors rounded-tl-xl",
+                      if(@explore_tab == :focus, do: "text-primary bg-primary/5", else: "text-base-content/50 hover:text-base-content")]}>
+                    <.icon name="hero-viewfinder-circle" class="w-3 h-3 inline mr-1" />Focus
                   </button>
-                </div>
-                <form phx-submit="focus_submit" class="flex flex-col gap-2">
-                  <textarea
-                    name="prompt"
-                    rows="2"
-                    placeholder="What are you working on?"
-                    autofocus
-                    class="w-full rounded-lg border border-base-300 bg-base-200/50 px-2.5 py-2 text-xs resize-none focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary"
-                    disabled={@focus_loading}
-                  ></textarea>
-                  <button
-                    type="submit"
-                    disabled={@focus_loading}
-                    class="w-full rounded-lg bg-primary px-3 py-1.5 text-xs font-medium text-primary-content hover:brightness-110 disabled:opacity-50 transition-all"
-                  >
-                    <%= if @focus_loading, do: "Finding…", else: "Find relevant areas" %>
+                  <button phx-click="set_explore_tab" phx-value-tab="explore"
+                    class={["flex-1 py-2 text-xs font-medium transition-colors",
+                      if(@explore_tab == :explore, do: "text-primary bg-primary/5", else: "text-base-content/50 hover:text-base-content")]}>
+                    <.icon name="hero-map" class="w-3 h-3 inline mr-1" />Explore
                   </button>
-                </form>
-              <% else %>
-                <%!-- Active focus: breadcrumb bar --%>
-                <div class="flex items-center gap-2">
-                  <.icon name="hero-viewfinder-circle" class="w-3.5 h-3.5 text-primary shrink-0" />
-                  <p class="flex-1 text-xs text-base-content/70 truncate">{@focus_prompt}</p>
-                  <%= if @focus_history != [] do %>
-                    <button
-                      phx-click="focus_back"
-                      class="shrink-0 flex items-center gap-1 text-xs text-base-content/50 hover:text-base-content transition-colors"
-                      title="Back to previous focus"
-                    >
-                      <.icon name="hero-arrow-left" class="w-3 h-3" />
-                      Back
-                    </button>
-                  <% end %>
-                  <button phx-click="exit_focus_mode" class="shrink-0 text-base-content/30 hover:text-base-content transition-colors">
+                  <button phx-click="exit_focus_mode" class="px-3 text-base-content/30 hover:text-base-content transition-colors rounded-tr-xl">
                     <.icon name="hero-x-mark" class="w-4 h-4" />
                   </button>
                 </div>
               <% end %>
+              <div class="p-3">
+                <%= if @focus_neighborhoods not in [nil, []] do %>
+                  <%!-- Active state: breadcrumb bar --%>
+                  <div class="flex items-center gap-2">
+                    <.icon name="hero-viewfinder-circle" class="w-3.5 h-3.5 text-primary shrink-0" />
+                    <p class="flex-1 text-xs text-base-content/70 truncate">{@focus_prompt}</p>
+                    <%= if @focus_history != [] do %>
+                      <button phx-click="focus_back"
+                        class="shrink-0 flex items-center gap-1 text-xs text-base-content/50 hover:text-base-content transition-colors"
+                        title="Back to previous focus">
+                        <.icon name="hero-arrow-left" class="w-3 h-3" /> Back
+                      </button>
+                    <% end %>
+                    <button phx-click="exit_focus_mode" class="shrink-0 text-base-content/30 hover:text-base-content transition-colors">
+                      <.icon name="hero-x-mark" class="w-4 h-4" />
+                    </button>
+                  </div>
+                <% else %>
+                  <%= if @explore_tab == :focus do %>
+                    <%!-- Focus tab: intent textarea --%>
+                    <form phx-submit="focus_submit" class="flex flex-col gap-2">
+                      <textarea name="prompt" rows="2" placeholder="What are you working on?" autofocus
+                        class="w-full rounded-lg border border-base-300 bg-base-200/50 px-2.5 py-2 text-xs resize-none focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary"
+                        disabled={@focus_loading}></textarea>
+                      <button type="submit" disabled={@focus_loading}
+                        class="w-full rounded-lg bg-primary px-3 py-1.5 text-xs font-medium text-primary-content hover:brightness-110 disabled:opacity-50 transition-all">
+                        <%= if @focus_loading, do: "Finding…", else: "Find relevant areas" %>
+                      </button>
+                    </form>
+                  <% else %>
+                    <%!-- Explore tab: slider + There Be Dragons --%>
+                    <form phx-submit="explore_submit" class="flex flex-col gap-3">
+                      <div class="flex items-center gap-2">
+                        <button type="button" phx-click="explore_submit" phx-value-slider="-1"
+                          class="shrink-0 text-xs px-2 py-1 rounded border border-warning/50 text-warning hover:bg-warning/10 transition-colors"
+                          title="Show only unconnected nodes">
+                          ⚠
+                        </button>
+                        <input type="range" name="slider" min="0" max="100" value={@explore_slider}
+                          class="flex-1 accent-primary" />
+                      </div>
+                      <div class="flex justify-between text-xs text-base-content/40">
+                        <span>Bushwhacking</span>
+                        <span>Worn Paths</span>
+                      </div>
+                      <button type="submit" disabled={@explore_loading}
+                        class="w-full rounded-lg bg-primary px-3 py-1.5 text-xs font-medium text-primary-content hover:brightness-110 disabled:opacity-50 transition-all">
+                        <%= if @explore_loading, do: "Exploring…", else: "Explore" %>
+                      </button>
+                    </form>
+                  <% end %>
+                <% end %>
+              </div>
             </div>
           <% end %>
 
