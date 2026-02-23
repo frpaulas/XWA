@@ -82,14 +82,10 @@ defmodule XwaWeb.GraphLive do
         _ -> nil
       end
 
-    # Double-tap: pop focus history or selection history
+    # Double-tap: pop selection history first, then focus history
     already_selected = match?(%{id: ^node_id}, socket.assigns.selected_node)
     cond do
-      already_selected and socket.assigns.focus_history != [] ->
-        handle_event("focus_back", %{}, socket)
-
       already_selected ->
-        # Restore previous selection, or clear if none
         case socket.assigns.selection_history do
           [%{selected_node: prev_node, neighborhood: prev_neighborhood} | rest] ->
             {:noreply, assign(socket,
@@ -99,7 +95,12 @@ defmodule XwaWeb.GraphLive do
               confirm_delete_edge: nil
             )}
           [] ->
-            {:noreply, assign(socket, selected_node: nil, neighborhood: nil, selection_history: [])}
+            # Selection history exhausted — pop focus history or clear
+            if socket.assigns.focus_history != [] do
+              handle_event("focus_back", %{}, socket)
+            else
+              {:noreply, assign(socket, selected_node: nil, neighborhood: nil, selection_history: [])}
+            end
         end
 
       true ->

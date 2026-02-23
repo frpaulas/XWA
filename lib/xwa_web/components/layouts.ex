@@ -46,7 +46,7 @@ defmodule XwaWeb.Layouts do
                 navigate={~p"/graph"}
                 class="flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm font-medium text-base-content/60 hover:text-base-content hover:bg-base-200 transition-colors"
               >
-                <.icon name="hero-share" class="w-4 h-4" /> Graph
+                <.icon name="hero-share" class="w-4 h-4" /> Reset graph
               </.link>
             </nav>
 
@@ -192,7 +192,7 @@ defmodule XwaWeb.Layouts do
               navigate={~p"/graph"}
               class="flex items-center gap-2 rounded-lg px-3 py-2.5 text-sm font-medium text-base-content/70 hover:text-base-content hover:bg-base-200 transition-colors"
             >
-              <.icon name="hero-share" class="w-4 h-4" /> Graph
+              <.icon name="hero-share" class="w-4 h-4" /> Reset graph
             </.link>
 
             <div class="my-1 border-t border-base-200"></div>

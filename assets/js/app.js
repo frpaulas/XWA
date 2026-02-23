@@ -56,6 +56,7 @@ const CytoscapeGraph = {
       if (focusJson !== this._prevFocusJson) {
         this._prevFocusJson = focusJson
         this._prevNeighborhoodJson = null
+        this.cy.elements().unselect()
         this._applyFocusMode(JSON.parse(focusJson))
       }
       return
@@ -63,6 +64,7 @@ const CytoscapeGraph = {
       // Focus cleared — restore all opacities before handling neighborhood
       if (this._prevFocusJson !== null) {
         this._prevFocusJson = null
+        this.cy.elements().unselect()
         this.cy.elements().removeStyle("opacity background-color border-color border-width")
         this.cy.fit(undefined, 60)
       }
