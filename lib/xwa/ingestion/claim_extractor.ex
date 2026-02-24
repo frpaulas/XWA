@@ -178,7 +178,7 @@ defmodule Xwa.Ingestion.ClaimExtractor do
 
   defp parse_date(str) when is_binary(str) do
     case Date.from_iso8601(str) do
-      {:ok, date} -> date
+      {:ok, date} -> Date.to_iso8601(date)
       _ -> nil
     end
   end

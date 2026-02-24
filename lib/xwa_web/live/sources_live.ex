@@ -35,6 +35,7 @@ defmodule XwaWeb.SourcesLive do
       |> assign(:pending_binary, nil)
       |> assign(:pending_content_type, nil)
       |> assign(:pending_filename, nil)
+      |> assign(:pending_extracted_text, nil)
       |> assign(:form, nil)
       |> assign(:doc_modal, nil)
       |> allow_upload(:document,
@@ -51,14 +52,16 @@ defmodule XwaWeb.SourcesLive do
   @impl true
   def handle_event("open_upload_panel", _params, socket) do
     {:noreply, assign(socket, show_upload_panel: true, panel_mode: :upload, upload_step: :file,
-      pending_upload: nil, pending_binary: nil, pending_content_type: nil, pending_filename: nil, form: nil)}
+      pending_upload: nil, pending_binary: nil, pending_content_type: nil, pending_filename: nil,
+      pending_extracted_text: nil, form: nil)}
   end
 
   def handle_event("close_upload_panel", _params, socket) do
     socket =
       socket
       |> assign(show_upload_panel: false, panel_mode: :upload, upload_step: :file,
-          pending_upload: nil, pending_binary: nil, pending_content_type: nil, pending_filename: nil, form: nil)
+          pending_upload: nil, pending_binary: nil, pending_content_type: nil, pending_filename: nil,
+          pending_extracted_text: nil, form: nil)
       |> cancel_uploads()
 
     {:noreply, socket}
@@ -76,11 +79,18 @@ defmodule XwaWeb.SourcesLive do
             {File.read!(path), e.client_type, e.client_name}
           end)
 
+        extracted_text =
+          case TextExtractor.extract(binary, content_type) do
+            {:ok, text} -> text
+            {:error, _} -> nil
+          end
+
         assign(socket,
           upload_step: :metadata,
           pending_binary: binary,
           pending_content_type: content_type,
           pending_filename: filename,
+          pending_extracted_text: extracted_text,
           form: to_form(Documents.change_document(%Document{}))
         )
       else
@@ -95,7 +105,8 @@ defmodule XwaWeb.SourcesLive do
     socket =
       socket
       |> assign(panel_mode: mode_atom, upload_step: :file,
-          pending_binary: nil, pending_content_type: nil, pending_filename: nil, form: nil)
+          pending_binary: nil, pending_content_type: nil, pending_filename: nil,
+          pending_extracted_text: nil, form: nil)
       |> cancel_uploads()
     {:noreply, socket}
   end
@@ -110,6 +121,7 @@ defmodule XwaWeb.SourcesLive do
         upload_step: :metadata,
         pending_content_type: "text/markdown",
         pending_filename: nil,
+        pending_extracted_text: binary,
         form: to_form(Documents.change_document(%Document{}))
       )}
     end
@@ -140,7 +152,8 @@ defmodule XwaWeb.SourcesLive do
         socket
         |> put_flash(:error, "Upload was lost. Please select the file again.")
         |> assign(upload_step: :file, pending_upload: nil, pending_binary: nil,
-                  pending_content_type: nil, pending_filename: nil, form: nil)
+                  pending_content_type: nil, pending_filename: nil,
+                  pending_extracted_text: nil, form: nil)
 
       {:noreply, socket}
     else
@@ -152,16 +165,13 @@ defmodule XwaWeb.SourcesLive do
               socket
               |> put_flash(:error, "This document has already been imported: \"#{existing.title}\"")
               |> assign(show_upload_panel: false, upload_step: :file, pending_upload: nil,
-                        pending_binary: nil, pending_content_type: nil, pending_filename: nil, form: nil)
+                        pending_binary: nil, pending_content_type: nil, pending_filename: nil,
+                        pending_extracted_text: nil, form: nil)
 
             {:noreply, socket}
 
           nil ->
-            extracted_text =
-              case TextExtractor.extract(binary, content_type) do
-                {:ok, text} -> text
-                {:error, _} -> nil
-              end
+            extracted_text = socket.assigns.pending_extracted_text
 
             doc_attrs = %{
               title: params["title"],
@@ -204,6 +214,7 @@ defmodule XwaWeb.SourcesLive do
                     pending_binary: nil,
                     pending_content_type: nil,
                     pending_filename: nil,
+                    pending_extracted_text: nil,
                     form: nil
                   )
 
@@ -444,11 +455,11 @@ defmodule XwaWeb.SourcesLive do
         </div>
       <% end %>
 
-      <%!-- Upload panel backdrop + slide-in / write modal --%>
+      <%!-- Import modal --%>
       <%= if @show_upload_panel do %>
         <div
           id="upload-backdrop"
-          class="fixed inset-0 z-40 bg-base-content/20 backdrop-blur-sm"
+          class="fixed inset-0 z-40 bg-black/50 backdrop-blur-sm"
           phx-click="close_upload_panel"
         >
         </div>
@@ -456,13 +467,17 @@ defmodule XwaWeb.SourcesLive do
         <div
           id="upload-panel"
           class={[
-            "fixed z-50 bg-base-100 shadow-2xl flex flex-col",
-            if(@panel_mode == :write and @upload_step == :file,
-              do: "inset-4 rounded-2xl md:inset-8 lg:inset-16",
-              else: "right-0 top-0 h-full w-full max-w-lg")
+            "fixed z-50 bg-base-100 rounded-2xl shadow-2xl flex flex-col",
+            "top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2",
+            "w-full mx-4",
+            if(@upload_step == :metadata,
+              do: "max-w-4xl",
+              else: if(@panel_mode == :write, do: "max-w-3xl", else: "max-w-lg")),
+            if(@upload_step == :metadata, do: "max-h-[90vh]", else: "")
           ]}
+          style={if @panel_mode == :write and @upload_step == :file, do: "height: calc(100vh - 4rem)", else: ""}
         >
-          <%!-- Panel header --%>
+          <%!-- Modal header --%>
           <div class="flex items-center justify-between border-b border-base-200 px-6 py-4 shrink-0">
             <div>
               <h2 class="text-base font-semibold text-base-content">Add document</h2>
@@ -518,19 +533,38 @@ defmodule XwaWeb.SourcesLive do
             </div>
           </div>
 
-          <%!-- Panel body --%>
-          <div class="flex-1 px-6 py-4 overflow-y-auto">
-            <%= cond do %>
-              <% @upload_step == :metadata -> %>
+          <%!-- Modal body --%>
+          <%= if @upload_step == :metadata do %>
+            <div class="flex flex-1 min-h-0 overflow-hidden">
+              <%!-- Left: form --%>
+              <div class="w-full md:w-80 lg:w-96 shrink-0 overflow-y-auto px-6 py-4 border-r border-base-200">
                 <.metadata_step form={@form} panel_mode={@panel_mode} pending_filename={@pending_filename} />
-              <% @panel_mode == :write -> %>
+              </div>
+              <%!-- Right: document preview --%>
+              <div class="flex-1 flex flex-col min-w-0 overflow-hidden">
+                <div class="px-4 py-3 border-b border-base-200 shrink-0">
+                  <p class="text-xs font-medium text-base-content/50 uppercase tracking-wider">Document preview</p>
+                </div>
+                <div class="flex-1 overflow-y-auto px-4 py-4">
+                  <%= if @pending_extracted_text do %>
+                    <pre class="text-xs text-base-content/75 font-sans whitespace-pre-wrap break-words leading-relaxed">{@pending_extracted_text}</pre>
+                  <% else %>
+                    <p class="text-sm text-base-content/40 text-center py-12">No preview available</p>
+                  <% end %>
+                </div>
+              </div>
+            </div>
+          <% else %>
+            <div class="flex-1 px-6 py-4 overflow-y-auto">
+              <%= if @panel_mode == :write do %>
                 <.write_step />
-              <% true -> %>
+              <% else %>
                 <.file_step uploads={@uploads} />
-            <% end %>
-          </div>
+              <% end %>
+            </div>
+          <% end %>
 
-          <%!-- Panel footer --%>
+          <%!-- Modal footer --%>
           <div class="border-t border-base-200 px-6 py-4 shrink-0 flex justify-end gap-3">
             <button
               phx-click="close_upload_panel"
