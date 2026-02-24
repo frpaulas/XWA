@@ -36,6 +36,7 @@ defmodule XwaWeb.SourcesLive do
       |> assign(:pending_content_type, nil)
       |> assign(:pending_filename, nil)
       |> assign(:form, nil)
+      |> assign(:doc_modal, nil)
       |> allow_upload(:document,
         accept: @accepted_types,
         max_entries: 1,
@@ -238,6 +239,23 @@ defmodule XwaWeb.SourcesLive do
     end
   end
 
+  def handle_event("open_doc_modal", %{"id" => doc_id}, socket) do
+    user_id = socket.assigns.current_scope.user.id
+    graph_id = socket.assigns.current_scope.graph_id
+    case Documents.get_decrypted_content(doc_id, user_id) do
+      {:ok, %{extracted_text: text}} ->
+        doc = Documents.get_document_for_graph(doc_id, graph_id)
+        modal = %{title: doc && doc.title, text: text, date: doc && doc.document_date}
+        {:noreply, assign(socket, doc_modal: modal)}
+      _ ->
+        {:noreply, put_flash(socket, :error, "Could not load document content")}
+    end
+  end
+
+  def handle_event("close_doc_modal", _params, socket) do
+    {:noreply, assign(socket, doc_modal: nil)}
+  end
+
   @impl true
   def handle_info({event, _document_id}, socket)
       when event in [:ingestion_complete, :ingestion_failed] do
@@ -339,12 +357,13 @@ defmodule XwaWeb.SourcesLive do
                 <%= for doc <- @documents do %>
                   <tr class="hover:bg-base-200/30 transition-colors">
                     <td class="px-4 py-3">
-                      <div class="flex items-center gap-3">
-                        <div class="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-primary/10">
+                      <button phx-click="open_doc_modal" phx-value-id={doc.id}
+                        class="flex items-center gap-3 w-full text-left group">
+                        <div class="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-primary/10 group-hover:bg-primary/20 transition-colors">
                           <.icon name={file_icon(doc.content_type)} class="w-4 h-4 text-primary" />
                         </div>
                         <div class="min-w-0">
-                          <p class="font-medium text-base-content truncate">{doc.title}</p>
+                          <p class="font-medium text-base-content group-hover:text-primary truncate transition-colors">{doc.title}</p>
                           <p class="text-xs text-base-content/45 mt-0.5">
                             {doc.filename} · {format_bytes(doc.byte_size || 0)}
                             <%= if doc.document_date do %>
@@ -352,7 +371,7 @@ defmodule XwaWeb.SourcesLive do
                             <% end %>
                           </p>
                         </div>
-                      </div>
+                      </button>
                     </td>
                     <td class="px-4 py-3 hidden md:table-cell">
                       <span class="text-xs text-base-content/60">{corpus_layer_label(doc.corpus_layer)}</span>
@@ -397,6 +416,33 @@ defmodule XwaWeb.SourcesLive do
           </div>
         <% end %>
       </div>
+
+      <%!-- Document viewer modal --%>
+      <%= if @doc_modal do %>
+        <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
+          <div class="bg-base-100 rounded-2xl shadow-2xl flex flex-col w-full max-w-2xl mx-4" style="max-height: 80vh">
+            <div class="flex items-start justify-between px-5 py-4 border-b border-base-200 shrink-0">
+              <div class="min-w-0 pr-4">
+                <h3 class="text-sm font-semibold text-base-content break-words">{@doc_modal.title}</h3>
+                <%= if @doc_modal.date do %>
+                  <p class="text-xs text-base-content/45 mt-0.5">{Calendar.strftime(@doc_modal.date, "%b %-d, %Y")}</p>
+                <% end %>
+              </div>
+              <button phx-click="close_doc_modal"
+                class="shrink-0 flex h-7 w-7 items-center justify-center rounded-lg text-base-content/40 hover:text-base-content hover:bg-base-200 transition-colors">
+                <.icon name="hero-x-mark" class="w-4 h-4" />
+              </button>
+            </div>
+            <div class="flex-1 overflow-y-auto px-5 py-4">
+              <%= if @doc_modal.text do %>
+                <pre class="text-xs text-base-content/80 font-sans whitespace-pre-wrap break-words leading-relaxed">{@doc_modal.text}</pre>
+              <% else %>
+                <p class="text-sm text-base-content/50 text-center py-8">No extracted text available for this document.</p>
+              <% end %>
+            </div>
+          </div>
+        </div>
+      <% end %>
 
       <%!-- Upload panel backdrop + slide-in / write modal --%>
       <%= if @show_upload_panel do %>

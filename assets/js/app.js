@@ -42,7 +42,7 @@ const CytoscapeGraph = {
     // LiveView patches this.el's attributes on updates but never touches its children,
     // so the canvas elements survive across LiveView re-renders.
     this._cyContainer = document.createElement("div")
-    this._cyContainer.style.cssText = "position:absolute;top:0;right:0;bottom:0;left:0;"
+    this._cyContainer.style.cssText = "position:absolute;top:0;right:0;bottom:0;left:0;overflow:hidden;"
     this.el.appendChild(this._cyContainer)
     this.initCy(JSON.parse(this.el.dataset.graph))
   },
@@ -66,7 +66,7 @@ const CytoscapeGraph = {
         this._prevFocusJson = null
         this.cy.elements().unselect()
         this.cy.elements().removeStyle("opacity display background-color border-color border-width")
-        this.cy.fit(undefined, 60)
+        this.cy.fit(undefined, 120)
       }
     }
 
@@ -88,7 +88,7 @@ const CytoscapeGraph = {
         this._prevNeighborhoodJson = null
         this.cy.elements().unselect()
         this.cy.elements().style({display: "element"})
-        this.cy.fit(undefined, 60)
+        this.cy.fit(undefined, 120)
       }
     }
   },
@@ -110,7 +110,7 @@ const CytoscapeGraph = {
       if (ele.isNode()) return hoodSet.has(ele.id())
       return hoodSet.has(ele.source().id()) && hoodSet.has(ele.target().id())
     })
-    if (hoodEles.length) this.cy.fit(hoodEles, 60)
+    if (hoodEles.length) this.cy.fit(hoodEles, 120)
   },
 
   _applyFocusMode(neighborhoods) {
@@ -143,7 +143,7 @@ const CytoscapeGraph = {
       if (ele.isNode()) return allHoodIds.has(ele.id())
       return allHoodIds.has(ele.source().id()) && allHoodIds.has(ele.target().id())
     })
-    if (hoodEles.length) this.cy.fit(hoodEles, 60)
+    if (hoodEles.length) this.cy.fit(hoodEles, 120)
   },
 
   initCy(data) {
@@ -181,13 +181,46 @@ const CytoscapeGraph = {
     this.cy.on("mouseover", "node", (evt) => {
       const n = evt.target
       const c = resolveColors()
+
+      // Determine label placement based on node's position within the canvas.
+      // Avoid painting toward whichever edge the node is closest to.
+      const pan = this.cy.pan()
+      const zoom = this.cy.zoom()
+      const pos = n.position()
+      const canvasW = this._cyContainer.offsetWidth
+      const canvasH = this._cyContainer.offsetHeight
+      // Pixel position of node centre within the container
+      const px = pos.x * zoom + pan.x
+      const py = pos.y * zoom + pan.y
+      const edgeFraction = 0.25 // within 25% of an edge → prefer opposite side
+
+      let valign = "bottom"
+      let halign = "center"
+      let marginY = 6
+      let marginX = 0
+
+      if (py / canvasH < edgeFraction) {
+        valign = "bottom"; marginY = 6
+      } else if (py / canvasH > (1 - edgeFraction)) {
+        valign = "top"; marginY = -6
+      }
+
+      if (px / canvasW < edgeFraction) {
+        halign = "right"; marginX = 6
+      } else if (px / canvasW > (1 - edgeFraction)) {
+        halign = "left"; marginX = -6
+      }
+
       n.style({
         "label": n.data("label"),
         "text-wrap": "wrap",
-        "text-max-width": "200px",
+        "text-max-width": "180px",
         "font-size": "12px",
-        "text-valign": "bottom",
-        "text-margin-y": "6px",
+        "text-valign": valign,
+        "text-halign": halign,
+        "text-margin-y": marginY,
+        "text-margin-x": marginX,
+        "text-justification": "center",
         "color": c.content,
         "text-background-color": "#fefce8",
         "text-background-opacity": 1,
@@ -212,7 +245,7 @@ function layoutConfig() {
     animate: true,
     animationDuration: 400,
     fit: true,
-    padding: 60,
+    padding: 120,
     // Node separation — minimum distance between node bounding boxes
     nodeSeparation: 80,
     // Edge length in pixels
