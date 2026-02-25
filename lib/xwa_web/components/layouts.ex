@@ -48,6 +48,14 @@ defmodule XwaWeb.Layouts do
               >
                 <.icon name="hero-share" class="w-4 h-4" /> Reset graph
               </.link>
+              <%= if @current_scope && @current_scope.user.role == "admin" do %>
+                <.link
+                  navigate={~p"/admin/upload"}
+                  class="flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm font-medium text-warning/70 hover:text-warning hover:bg-base-200 transition-colors"
+                >
+                  <.icon name="hero-arrow-up-tray" class="w-4 h-4" /> Admin
+                </.link>
+              <% end %>
             </nav>
 
             <%!-- Right side controls --%>

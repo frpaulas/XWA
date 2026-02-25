@@ -13,6 +13,7 @@ defmodule Xwa.Accounts.User do
     field :avatar_url, :string
     field :provider, :string
     field :provider_id, :string
+    field :role, :string, default: "user"
 
     belongs_to :organization, Xwa.Accounts.Organization
     has_many :graph_memberships, Xwa.Graphs.GraphMembership

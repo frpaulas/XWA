@@ -92,6 +92,33 @@ defmodule Xwa.Ingestion.ExtractionRuns do
   end
 
   @doc """
+  Returns per-month cost totals for the last 12 complete months plus the current
+  month-to-date, ordered oldest-first. Each row is a map:
+
+    %{month: "2026-02", runs: 42, input_tokens: 1_200_000,
+      output_tokens: 80_000, cost_usd: Decimal}
+  """
+  @spec monthly_cost_summary() :: [map()]
+  def monthly_cost_summary do
+    cutoff = Date.utc_today() |> Date.beginning_of_month() |> Date.add(-365)
+    cutoff_dt = DateTime.new!(cutoff, ~T[00:00:00], "Etc/UTC")
+
+    Repo.all(
+      from r in ExtractionRun,
+        where: r.inserted_at >= ^cutoff_dt,
+        group_by: fragment("to_char(?, 'YYYY-MM')", r.inserted_at),
+        order_by: fragment("to_char(?, 'YYYY-MM')", r.inserted_at),
+        select: %{
+          month: fragment("to_char(?, 'YYYY-MM')", r.inserted_at),
+          runs: count(r.id),
+          input_tokens: sum(r.input_tokens),
+          output_tokens: sum(r.output_tokens),
+          cost_usd: sum(r.cost_usd)
+        }
+    )
+  end
+
+  @doc """
   Returns all failed runs for a graph.
   """
   @spec list_errors_for_graph(String.t()) :: [ExtractionRun.t()]

@@ -83,6 +83,23 @@ defmodule Xwa.Graphs do
   def get_graph!(id), do: Repo.get!(Graph, id)
 
   @doc """
+  Returns all graphs in the system with their owner user preloaded.
+  Used by admin UI to select a target graph for document import.
+  """
+  @spec list_all_graphs() :: [Graph.t()]
+  def list_all_graphs do
+    Repo.all(
+      from g in Graph,
+        left_join: m in GraphMembership,
+        on: m.graph_id == g.id and m.role == "owner",
+        left_join: u in Xwa.Accounts.User,
+        on: u.id == m.user_id,
+        order_by: [asc: g.inserted_at],
+        select: %{id: g.id, name: g.name, owner_email: u.email}
+    )
+  end
+
+  @doc """
   Returns all graphs the given user is a member of, preloading their membership role.
   """
   @spec list_graphs_for_user(String.t()) :: [Graph.t()]

@@ -29,6 +29,11 @@ defmodule XwaWeb.Router do
       live "/sources", SourcesLive
       live "/graph", GraphLive
     end
+
+    live_session :admin,
+      on_mount: {XwaWeb.Plugs.RequireAdmin, :require_admin} do
+      live "/admin/upload", AdminUploadLive
+    end
   end
 
   scope "/auth", XwaWeb do

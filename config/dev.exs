@@ -27,7 +27,7 @@ config :ueberauth, Ueberauth.Strategy.Github.OAuth,
 
 # Configure Memgraph connection via Bolt protocol (bolt_sips)
 config :bolt_sips, Bolt,
-  url: "bolt://localhost:7687",
+  url: System.get_env("MEMGRAPH_URL") || "bolt://localhost:7687",
   pool_size: 10,
   prefix: :default
 
@@ -36,6 +36,7 @@ config :xwa, Xwa.Repo,
   username: System.get_env("XWA_DB_USER") || "xwa",
   password: System.get_env("XWA_DB_PASSWORD") || raise("XWA_DB_PASSWORD env var not set"),
   hostname: System.get_env("XWA_DB_HOST") || "localhost",
+  port: String.to_integer(System.get_env("XWA_DB_PORT") || "5432"),
   database: System.get_env("XWA_DB_NAME") || "xwa",
   stacktrace: true,
   show_sensitive_data_on_connection_error: true,
