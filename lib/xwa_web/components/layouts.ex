@@ -48,6 +48,7 @@ defmodule XwaWeb.Layouts do
               >
                 <.icon name="hero-share" class="w-4 h-4" /> Reset graph
               </.link>
+              <.graph_switcher current_scope={@current_scope} />
               <%= if @current_scope && @current_scope.user.role == "admin" do %>
                 <.link
                   navigate={~p"/admin/upload"}
@@ -291,6 +292,49 @@ defmodule XwaWeb.Layouts do
     </div>
 
     <.flash_group flash={@flash} />
+    """
+  end
+
+  attr :current_scope, :map, default: nil
+  defp graph_switcher(assigns) do
+    ~H"""
+    <%= if @current_scope && length(@current_scope.graphs) > 1 do %>
+      <div class="relative group">
+        <button class="flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm font-medium text-base-content/60 hover:text-base-content hover:bg-base-200 transition-colors">
+          <.icon name="hero-rectangle-stack" class="w-4 h-4" />
+          <span class="max-w-[120px] truncate">{@current_scope.graph && @current_scope.graph.name || "No graph"}</span>
+          <.icon name="hero-chevron-down" class="w-3 h-3 opacity-60" />
+        </button>
+        <div class="absolute left-0 top-full mt-1 min-w-[180px] rounded-xl border border-base-200 bg-base-100 shadow-lg opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all duration-150 origin-top-left z-50">
+          <div class="p-1">
+            <p class="px-3 py-1.5 text-[0.65rem] font-semibold uppercase tracking-wider text-base-content/40">Your graphs</p>
+            <%= for graph <- @current_scope.graphs do %>
+              <form action={~p"/graph/switch"} method="post" class="contents">
+                <input type="hidden" name="_csrf_token" value={get_csrf_token()} />
+                <input type="hidden" name="graph_id" value={graph.id} />
+                <button
+                  type="submit"
+                  class={"flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm text-left transition-colors " <>
+                    if(@current_scope.graph_id == graph.id,
+                      do: "bg-primary/10 text-primary font-medium",
+                      else: "text-base-content/70 hover:bg-base-200 hover:text-base-content")}
+                >
+                  <%= if @current_scope.graph_id == graph.id do %>
+                    <.icon name="hero-check" class="w-3.5 h-3.5 shrink-0" />
+                  <% else %>
+                    <span class="w-3.5 shrink-0" />
+                  <% end %>
+                  <span class="truncate">{graph.name}</span>
+                  <%= if graph.is_composite do %>
+                    <span class="ml-auto text-[0.6rem] uppercase tracking-wide text-base-content/30">composite</span>
+                  <% end %>
+                </button>
+              </form>
+            <% end %>
+          </div>
+        </div>
+      </div>
+    <% end %>
     """
   end
 

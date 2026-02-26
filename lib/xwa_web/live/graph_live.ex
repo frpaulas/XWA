@@ -2,38 +2,23 @@ defmodule XwaWeb.GraphLive do
   use XwaWeb, :live_view
 
   alias Xwa.Graph.{Nodes, Edges, FocusScorer}
-  alias Xwa.Documents
+  alias Xwa.{Documents, Graphs}
 
   @impl true
   def mount(_params, _session, socket) do
-    user_id = socket.assigns.current_scope.user.id
-    graph_id = socket.assigns.current_scope.graph_id
-
-    {nodes, all_edges} =
-      if graph_id do
-        n = case Nodes.list(graph_id, user_id: user_id) do
-          {:ok, list} -> list
-          _ -> []
-        end
-        e = case all_edges(graph_id, user_id) do
-          {:ok, list} -> list
-          _ -> []
-        end
-        {n, e}
-      else
-        {[], []}
-      end
+    if connected?(socket), do: Process.send_after(self(), :load_graph, 50)
 
     socket =
       socket
+      |> assign(:loading, true)
       |> assign(:selected_node, nil)
       |> assign(:neighborhood, nil)
       |> assign(:filter_layer, "all")
       |> assign(:filter_type, "all")
       |> assign(:search, "")
-      |> assign(:nodes, nodes)
-      |> assign(:all_edges, all_edges)
-      |> assign(:graph_data, build_graph_data(nodes, all_edges))
+      |> assign(:nodes, [])
+      |> assign(:all_edges, [])
+      |> assign(:graph_data, build_graph_data([], []))
       |> assign(:connect_from, nil)
       |> assign(:new_edge_modal, nil)
       |> assign(:confirm_delete_edge, nil)
@@ -80,7 +65,8 @@ defmodule XwaWeb.GraphLive do
       with true <- not is_nil(socket.assigns.current_scope.graph_id),
            graph_id = socket.assigns.current_scope.graph_id,
            user_id = socket.assigns.current_scope.user.id,
-           {:ok, %{nodes: nbr_nodes}} <- Nodes.neighborhood(node_id, graph_id, user_id: user_id) do
+           graph_ids = Graphs.resolve_graph_ids(graph_id),
+           {:ok, %{nodes: nbr_nodes}} <- Nodes.neighborhood(node_id, graph_ids, user_id: user_id) do
         %{center_id: node_id, ids: Enum.map(nbr_nodes, & &1.id)}
       else
         _ -> nil
@@ -92,18 +78,20 @@ defmodule XwaWeb.GraphLive do
       already_selected ->
         case socket.assigns.selection_history do
           [%{selected_node: prev_node, neighborhood: prev_neighborhood} | rest] ->
-            {:noreply, assign(socket,
+            socket = assign(socket,
               selected_node: prev_node,
               neighborhood: prev_neighborhood,
               selection_history: rest,
               confirm_delete_edge: nil
-            )}
+            )
+            {:noreply, push_canvas_events(socket)}
           [] ->
             # Selection history exhausted — pop focus history or clear
             if socket.assigns.focus_history != [] do
               handle_event("focus_back", %{}, socket)
             else
-              {:noreply, assign(socket, selected_node: nil, neighborhood: nil, selection_history: [])}
+              socket = assign(socket, selected_node: nil, neighborhood: nil, selection_history: [])
+              {:noreply, push_canvas_events(socket)}
             end
         end
 
@@ -129,17 +117,19 @@ defmodule XwaWeb.GraphLive do
             socket
           end
 
-        {:noreply, assign(socket,
+        socket = assign(socket,
           selected_node: selected,
           neighborhood: neighborhood,
           selection_history: selection_history,
           confirm_delete_edge: nil
-        )}
+        )
+        {:noreply, push_canvas_events(socket)}
     end
   end
 
   def handle_event("deselect", _params, socket) do
-    {:noreply, assign(socket, selected_node: nil, neighborhood: nil, connect_from: nil, new_edge_modal: nil, confirm_delete_edge: nil, selection_history: [])}
+    socket = assign(socket, selected_node: nil, neighborhood: nil, connect_from: nil, new_edge_modal: nil, confirm_delete_edge: nil, selection_history: [])
+    {:noreply, push_canvas_events(socket)}
   end
 
   def handle_event("enter_focus_mode", _params, socket) do
@@ -147,13 +137,14 @@ defmodule XwaWeb.GraphLive do
   end
 
   def handle_event("exit_focus_mode", _params, socket) do
-    {:noreply, assign(socket, focus_mode: false, focus_loading: false, focus_neighborhoods: nil, selected_node: nil, neighborhood: nil, focus_history: [], selection_history: [], explore_tab: :focus, explore_slider: 50, explore_loading: false)}
+    socket = assign(socket, focus_mode: false, focus_loading: false, focus_neighborhoods: nil, selected_node: nil, neighborhood: nil, focus_history: [], selection_history: [], explore_tab: :focus, explore_slider: 50, explore_loading: false)
+    {:noreply, push_canvas_events(socket)}
   end
 
   def handle_event("focus_back", _params, socket) do
     case socket.assigns.focus_history do
       [%{prompt: prompt, neighborhoods: neighborhoods} | rest] ->
-        {:noreply, assign(socket,
+        socket = assign(socket,
           focus_mode: true,
           focus_prompt: prompt,
           focus_neighborhoods: neighborhoods,
@@ -161,9 +152,11 @@ defmodule XwaWeb.GraphLive do
           focus_history: rest,
           selected_node: nil,
           neighborhood: nil
-        )}
+        )
+        {:noreply, push_canvas_events(socket)}
       [] ->
-        {:noreply, assign(socket, focus_mode: false, focus_neighborhoods: nil)}
+        socket = assign(socket, focus_mode: false, focus_neighborhoods: nil)
+        {:noreply, push_canvas_events(socket)}
     end
   end
 
@@ -204,9 +197,52 @@ defmodule XwaWeb.GraphLive do
   end
 
   @impl true
+  def handle_info(:load_graph, socket) do
+    user_id = socket.assigns.current_scope.user.id
+    graph_id = socket.assigns.current_scope.graph_id
+
+    {nodes, edges} =
+      if graph_id do
+        graph_ids = Graphs.resolve_graph_ids(graph_id)
+        require Logger
+        Logger.info("[GraphLive] loading graph_id=#{graph_id} graph_ids=#{inspect(graph_ids)}")
+
+        n_result = Nodes.list(graph_ids, user_id: user_id)
+        e_result = all_edges(graph_ids, user_id)
+        Logger.info("[GraphLive] nodes=#{inspect(n_result |> elem(0))} count=#{(match?({:ok, _}, n_result) && length(elem(n_result, 1))) || :error}")
+        Logger.info("[GraphLive] edges result=#{inspect(e_result |> elem(0))} count=#{(match?({:ok, _}, e_result) && length(elem(e_result, 1))) || :error}")
+
+        n = case n_result do
+          {:ok, list} -> list
+          err -> Logger.error("[GraphLive] nodes error: #{inspect(err)}"); []
+        end
+        e = case e_result do
+          {:ok, list} -> list
+          err -> Logger.error("[GraphLive] edges error: #{inspect(err)}"); []
+        end
+        {n, e}
+      else
+        {[], []}
+      end
+
+    composite_graph_id = composite_id(socket)
+    graph_data = build_graph_data(nodes, edges, composite_graph_id)
+
+    socket =
+      socket
+      |> assign(:loading, false)
+      |> assign(:nodes, nodes)
+      |> assign(:all_edges, edges)
+      |> assign(:graph_data, graph_data)
+      |> push_event("graph_loaded", Map.put(graph_data, :full_reload, true))
+
+    {:noreply, socket}
+  end
+
   def handle_info({:run_focus, prompt}, socket) do
     graph_id = socket.assigns.current_scope.graph_id
     user_id = socket.assigns.current_scope.user.id
+    graph_ids = Graphs.resolve_graph_ids(graph_id)
     nodes = socket.assigns.nodes
 
     node_summaries = Enum.map(nodes, fn n ->
@@ -219,7 +255,7 @@ defmodule XwaWeb.GraphLive do
         top_ids
         |> Task.async_stream(
           fn node_id ->
-            case Nodes.neighborhood(node_id, graph_id, user_id: user_id) do
+            case Nodes.neighborhood(node_id, graph_ids, user_id: user_id) do
               {:ok, %{nodes: nb_nodes}} ->
                 %{center_id: node_id, ids: Enum.map(nb_nodes, & &1.id)}
               _ ->
@@ -236,7 +272,8 @@ defmodule XwaWeb.GraphLive do
         _ -> []
       end
 
-    {:noreply, assign(socket, focus_loading: false, focus_neighborhoods: neighborhoods)}
+    socket = assign(socket, focus_loading: false, focus_neighborhoods: neighborhoods)
+    {:noreply, push_canvas_events(socket)}
   end
 
   def handle_info({:run_explore, slider}, socket) do
@@ -244,6 +281,7 @@ defmodule XwaWeb.GraphLive do
     all_edges = socket.assigns.all_edges
     graph_id = socket.assigns.current_scope.graph_id
     user_id = socket.assigns.current_scope.user.id
+    graph_ids = Graphs.resolve_graph_ids(graph_id)
 
     edge_counts =
       Enum.reduce(all_edges, %{}, fn e, acc ->
@@ -276,7 +314,7 @@ defmodule XwaWeb.GraphLive do
       top_ids
       |> Task.async_stream(
         fn node_id ->
-          case Nodes.neighborhood(node_id, graph_id, user_id: user_id) do
+          case Nodes.neighborhood(node_id, graph_ids, user_id: user_id) do
             {:ok, %{nodes: nb_nodes}} ->
               %{center_id: node_id, ids: Enum.map(nb_nodes, & &1.id)}
             _ ->
@@ -290,7 +328,8 @@ defmodule XwaWeb.GraphLive do
         _ -> []
       end)
 
-    {:noreply, assign(socket, explore_loading: false, focus_neighborhoods: neighborhoods, focus_mode: true)}
+    socket = assign(socket, explore_loading: false, focus_neighborhoods: neighborhoods, focus_mode: true)
+    {:noreply, push_canvas_events(socket)}
   end
 
   def handle_event("start_connect", _params, socket) do
@@ -358,6 +397,7 @@ defmodule XwaWeb.GraphLive do
 
   def handle_event("create_edge", params, socket) do
     user_id = socket.assigns.current_scope.user.id
+    graph_id = socket.assigns.current_scope.graph_id
     modal = socket.assigns.new_edge_modal
 
     attrs = %{
@@ -368,7 +408,8 @@ defmodule XwaWeb.GraphLive do
       confidence: 1.0,
       ai_inferred: false,
       human_validated: true,
-      created_by: user_id
+      created_by: user_id,
+      graph_id: graph_id
     }
 
     case Edges.create(attrs) do
@@ -408,8 +449,8 @@ defmodule XwaWeb.GraphLive do
   # Private
   # ---------------------------------------------------------------------------
 
-  defp all_edges(graph_id, user_id) do
-    Edges.list(graph_id, user_id)
+  defp all_edges(graph_ids, user_id) do
+    Edges.list(graph_ids, user_id)
   end
 
   defp apply_filters(socket, layer, type, search) do
@@ -430,11 +471,28 @@ defmodule XwaWeb.GraphLive do
           MapSet.member?(node_ids, e.to_node_id)
       end)
 
+    graph_data = build_graph_data(filtered, filtered_edges, composite_id(socket))
+
     socket
     |> assign(:filter_layer, layer)
     |> assign(:filter_type, type)
     |> assign(:search, search)
-    |> assign(:graph_data, build_graph_data(filtered, filtered_edges))
+    |> assign(:graph_data, graph_data)
+    |> push_event("graph_loaded", graph_data)
+  end
+
+  # Push canvas overlay events to the hook whenever neighborhood or focus changes.
+  # Since #cy uses phx-update="ignore", LiveView never patches its data-* attributes,
+  # so the hook can't rely on updated() for these — they must come via push_event.
+  defp push_canvas_events(socket) do
+    socket
+    |> push_event("neighborhood_changed", socket.assigns.neighborhood || %{})
+    |> push_event("focus_changed", %{neighborhoods: socket.assigns.focus_neighborhoods || []})
+  end
+
+  defp composite_id(socket) do
+    graph = socket.assigns.current_scope.graph
+    if graph && graph.is_composite, do: graph.id, else: nil
   end
 
   defp filter_by_layer(nodes, "all"), do: nodes
@@ -452,7 +510,7 @@ defmodule XwaWeb.GraphLive do
     end)
   end
 
-  defp build_graph_data(nodes, edges) do
+  defp build_graph_data(nodes, edges, composite_graph_id \\ nil) do
     cy_nodes =
       Enum.map(nodes, fn n ->
         %{
@@ -470,6 +528,7 @@ defmodule XwaWeb.GraphLive do
 
     cy_edges =
       Enum.map(edges, fn e ->
+        cross_graph = not is_nil(composite_graph_id) and e.graph_id == composite_graph_id
         %{
           data: %{
             id: e.id,
@@ -477,7 +536,8 @@ defmodule XwaWeb.GraphLive do
             target: e.to_node_id,
             type: e.type || "relates",
             certainty: e.certainty || "dashed",
-            confidence: e.confidence || 0.5
+            confidence: e.confidence || 0.5,
+            cross_graph: cross_graph
           }
         }
       end)
@@ -789,8 +849,20 @@ defmodule XwaWeb.GraphLive do
 
         <%!-- Main: graph canvas --%>
         <div class="flex-1 relative bg-base-200/30">
-          <%!-- Empty state: shown via CSS when there are no nodes --%>
-          <%= if @graph_data.nodes == [] do %>
+          <%!-- Loading spinner: always in DOM, JS hook hides it after layout completes --%>
+          <div
+            id="cy-loading"
+            phx-update="ignore"
+            class="absolute inset-0 flex flex-col items-center justify-center text-center z-10 bg-base-100 transition-opacity duration-300"
+          >
+            <svg class="animate-spin h-8 w-8 text-primary mb-3" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+              <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+              <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+            </svg>
+            <p id="cy-loading-msg" class="text-sm text-base-content/60">Loading graph…</p>
+          </div>
+          <%!-- Empty state: only shown after loading completes --%>
+          <%= if !@loading && @graph_data.nodes == [] do %>
             <div class="absolute inset-0 flex flex-col items-center justify-center text-center">
               <div class="flex h-12 w-12 items-center justify-center rounded-xl bg-base-200 mb-4">
                 <.icon name="hero-circle-stack" class="w-6 h-6 text-base-content/40" />
@@ -799,6 +871,14 @@ defmodule XwaWeb.GraphLive do
               <p class="text-xs text-base-content/40 mt-1">Import a document to get started</p>
             </div>
           <% end %>
+          <%!-- Hover label strip: JS updates this on node mouseover/mouseout --%>
+          <div
+            id="cy-hover-label"
+            class="absolute top-0 left-0 right-0 z-20 pointer-events-none px-4 py-2 min-h-[2.25rem] flex items-center"
+            style="display:none;"
+          >
+            <span id="cy-hover-text" class="text-sm font-medium text-base-content bg-base-100/90 backdrop-blur-sm px-3 py-1 rounded-lg shadow border border-base-300 max-w-full truncate"></span>
+          </div>
           <%!-- Canvas: always in DOM so LiveView patches rather than replaces it --%>
           <div
             id="cy"

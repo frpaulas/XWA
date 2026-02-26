@@ -29,28 +29,38 @@ defmodule Xwa.Graph.Nodes do
   # ---------------------------------------------------------------------------
 
   @doc """
-  Returns all Claim nodes in a given graph, respecting visibility rules for
-  the requesting user:
+  Returns all Claim nodes in one or more graphs, respecting visibility rules
+  for the requesting user:
   - "system" nodes are visible to all members
   - "private" nodes are only visible to their creator
   - "shared" nodes are visible to all members (shared_with is empty) or to
     the users listed in shared_with
 
+  `graph_id` may be a single binary UUID or a list of UUIDs (for composite
+  graphs resolved via `Xwa.Graphs.resolve_graph_ids/1`).
+
   Pass `user_id: nil` to skip visibility filtering (internal use only).
   """
-  @spec list(String.t(), keyword()) :: {:ok, [Node.t()]} | {:error, any()}
-  def list(graph_id, opts \\ []) when is_binary(graph_id) do
+  @spec list(String.t() | [String.t()], keyword()) :: {:ok, [Node.t()]} | {:error, any()}
+  def list(graph_id, opts \\ [])
+
+  def list(graph_id, opts) when is_binary(graph_id) do
+    list([graph_id], opts)
+  end
+
+  def list(graph_ids, opts) when is_list(graph_ids) do
     user_id = Keyword.get(opts, :user_id)
 
     cypher = """
-    MATCH (n:Claim {graph_id: $graph_id})
-    WHERE n.visibility = 'system'
-       OR n.created_by = $user_id
-       OR (n.visibility = 'shared' AND (size(coalesce(n.shared_with, [])) = 0 OR $user_id IN coalesce(n.shared_with, [])))
+    MATCH (n:Claim)
+    WHERE n.graph_id IN $graph_ids
+      AND (n.visibility = 'system'
+        OR n.created_by = $user_id
+        OR (n.visibility = 'shared' AND (size(coalesce(n.shared_with, [])) = 0 OR $user_id IN coalesce(n.shared_with, []))))
     RETURN n
     """
 
-    params = %{graph_id: graph_id, user_id: user_id}
+    params = %{graph_ids: graph_ids, user_id: user_id}
 
     case Graph.query(cypher, params) do
       {:ok, rows} -> {:ok, Enum.map(rows, &node_from_row/1)}
@@ -62,11 +72,20 @@ defmodule Xwa.Graph.Nodes do
   Returns the 2-hop neighborhood of a node: the node itself, all nodes within
   2 hops, and all edges between them. Respects visibility for the requesting user.
 
+  `graph_id` may be a single binary UUID or a list of UUIDs (for composite
+  graphs resolved via `Xwa.Graphs.resolve_graph_ids/1`).
+
   Returns `{:ok, %{nodes: [Node.t()], edges: [Edge.t()]}}`.
   """
-  @spec neighborhood(String.t(), String.t(), keyword()) ::
+  @spec neighborhood(String.t(), String.t() | [String.t()], keyword()) ::
           {:ok, %{nodes: [Node.t()], edges: [Xwa.Graph.Edge.t()]}} | {:error, any()}
-  def neighborhood(node_id, graph_id, opts \\ []) do
+  def neighborhood(node_id, graph_id, opts \\ [])
+
+  def neighborhood(node_id, graph_id, opts) when is_binary(graph_id) do
+    neighborhood(node_id, [graph_id], opts)
+  end
+
+  def neighborhood(node_id, graph_ids, opts) when is_list(graph_ids) do
     user_id = Keyword.get(opts, :user_id)
 
     node_visibility =
@@ -91,27 +110,29 @@ defmodule Xwa.Graph.Nodes do
       end
 
     node_cypher = """
-    MATCH (center:Claim {id: $node_id, graph_id: $graph_id})-[:RELATES]-(nb:Claim {graph_id: $graph_id})
-    WHERE 1=1
+    MATCH (center:Claim {id: $node_id})-[:RELATES]-(nb:Claim)
+    WHERE center.graph_id IN $graph_ids AND nb.graph_id IN $graph_ids
     #{node_visibility}
     RETURN DISTINCT nb AS n
     UNION
-    MATCH (n:Claim {id: $node_id, graph_id: $graph_id})
+    MATCH (n:Claim {id: $node_id})
+    WHERE n.graph_id IN $graph_ids
     RETURN n
     """
 
     edge_cypher = """
-    MATCH (center:Claim {id: $node_id, graph_id: $graph_id})-[:RELATES]-(nb:Claim {graph_id: $graph_id})
+    MATCH (center:Claim {id: $node_id})-[:RELATES]-(nb:Claim)
+    WHERE center.graph_id IN $graph_ids AND nb.graph_id IN $graph_ids
     WITH collect(DISTINCT nb) + [center] AS hood
     UNWIND hood AS a
     UNWIND hood AS b
     MATCH (a)-[r:RELATES]->(b)
-    WHERE r.graph_id = $graph_id
+    WHERE r.graph_id IN $graph_ids
     #{edge_visibility}
     RETURN DISTINCT r
     """
 
-    params = %{node_id: node_id, graph_id: graph_id, user_id: user_id}
+    params = %{node_id: node_id, graph_ids: graph_ids, user_id: user_id}
 
     with {:ok, node_rows} <- Graph.query(node_cypher, params),
          {:ok, edge_rows} <- Graph.query(edge_cypher, params) do

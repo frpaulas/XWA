@@ -55,6 +55,6 @@ defmodule XwaWeb.Plugs.RequireAdmin do
 
     role = graph && Xwa.Graphs.role_for(graph.id, user.id)
 
-    %{user: user, graph: graph, graph_id: graph && graph.id, role: role}
+    %{user: user, graph: graph, graph_id: graph && graph.id, role: role, graphs: graphs}
   end
 end

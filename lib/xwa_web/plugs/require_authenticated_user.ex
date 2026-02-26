@@ -69,7 +69,8 @@ defmodule XwaWeb.Plugs.RequireAuthenticatedUser do
       user: user,
       graph: graph,
       graph_id: graph && graph.id,
-      role: role
+      role: role,
+      graphs: graphs
     }
   end
 end

@@ -36,61 +36,56 @@ cytoscape.use(fcose)
 const CytoscapeGraph = {
   mounted() {
     this._layoutDone = false
-    this._prevNeighborhoodJson = null
-    this._prevFocusJson = null
+    this._pendingNeighborhood = null
+    this._pendingFocus = null
     // Mount Cytoscape on a stable child div, not this.el directly.
     // LiveView patches this.el's attributes on updates but never touches its children,
     // so the canvas elements survive across LiveView re-renders.
     this._cyContainer = document.createElement("div")
     this._cyContainer.style.cssText = "position:absolute;top:0;right:0;bottom:0;left:0;overflow:hidden;"
     this.el.appendChild(this._cyContainer)
-    this.initCy(JSON.parse(this.el.dataset.graph))
+
+    // Listen for graph data pushed from the server after async load or filter change
+    this.handleEvent("graph_loaded", (data) => {
+      if (this.cy) {
+        this.cy.destroy()
+        this.cy = null
+      }
+      this._layoutDone = false
+      this._pendingNeighborhood = null
+      this._pendingFocus = null
+      if (data.full_reload) this._showOverlay()
+      this.initCy(data)
+    })
+
+    this.handleEvent("neighborhood_changed", (neighborhood) => {
+      this._pendingNeighborhood = neighborhood && neighborhood.center_id ? neighborhood : null
+      this._pendingFocus = null
+      if (this._layoutDone) this._applyPendingOverlay()
+    })
+
+    this.handleEvent("focus_changed", ({neighborhoods}) => {
+      const hasFocus = neighborhoods && neighborhoods.length > 0
+      this._pendingFocus = hasFocus ? neighborhoods : null
+      if (hasFocus) {
+        // Focus mode is mutually exclusive with neighborhood
+        this._pendingNeighborhood = null
+        if (this._layoutDone) this._applyPendingOverlay()
+      }
+      // If focus is empty, leave neighborhood state untouched — neighborhood_changed owns that
+    })
+
+    // Initial render: start with whatever data-graph holds (may be empty on async load)
+    const initialData = JSON.parse(this.el.dataset.graph)
+    if (initialData.nodes && initialData.nodes.length > 0) {
+      this.initCy(initialData)
+    }
+    // Otherwise wait for "graph_loaded" event
   },
 
   updated() {
-    if (!this.cy) return
-
-    // Focus mode takes priority over neighborhood highlighting
-    const focusJson = this.el.dataset.focus
-    if (focusJson && focusJson !== "null") {
-      if (focusJson !== this._prevFocusJson) {
-        this._prevFocusJson = focusJson
-        this._prevNeighborhoodJson = null
-        this.cy.elements().unselect()
-        this._applyFocusMode(JSON.parse(focusJson))
-      }
-      return
-    } else {
-      // Focus cleared — restore all opacities before handling neighborhood
-      if (this._prevFocusJson !== null) {
-        this._prevFocusJson = null
-        this.cy.elements().unselect()
-        this.cy.elements().removeStyle("opacity display background-color border-color border-width")
-        this.cy.fit(undefined, 120)
-      }
-    }
-
-    const neighborhoodJson = this.el.dataset.neighborhood
-    if (neighborhoodJson && neighborhoodJson !== "null") {
-      if (neighborhoodJson !== this._prevNeighborhoodJson) {
-        this._prevNeighborhoodJson = neighborhoodJson
-        const {center_id, ids} = JSON.parse(neighborhoodJson)
-        const hoodSet = new Set(ids)
-        hoodSet.add(center_id)
-        this._applyNeighborhood(hoodSet)
-        // Sync Cytoscape selection to the center node
-        this.cy.elements().unselect()
-        const centerNode = this.cy.getElementById(center_id)
-        if (centerNode.length) centerNode.select()
-      }
-    } else {
-      if (this._prevNeighborhoodJson !== null) {
-        this._prevNeighborhoodJson = null
-        this.cy.elements().unselect()
-        this.cy.elements().style({display: "element"})
-        this.cy.fit(undefined, 120)
-      }
-    }
+    // Neighborhood, focus, and graph data are all delivered via push_event / handleEvent.
+    // Nothing to do on DOM attribute updates.
   },
 
   destroyed() {
@@ -98,7 +93,47 @@ const CytoscapeGraph = {
     if (this.cy) this.cy.destroy()
   },
 
-  _applyNeighborhood(hoodSet) {
+  _showOverlay() {
+    const overlay = document.getElementById("cy-loading")
+    if (overlay) {
+      console.log("[cy] showOverlay")
+      overlay.classList.remove("opacity-0", "pointer-events-none")
+    }
+  },
+
+  _hideOverlay() {
+    const overlay = document.getElementById("cy-loading")
+    if (overlay) {
+      console.log("[cy] hideOverlay")
+      overlay.classList.add("opacity-0", "pointer-events-none")
+    }
+  },
+
+  _applyPendingOverlay() {
+    if (!this.cy) return
+    if (this._pendingFocus) {
+      console.log("[cy] _applyPendingOverlay: focus mode")
+      this.cy.elements().unselect()
+      this._applyFocusMode(this._pendingFocus)
+    } else if (this._pendingNeighborhood) {
+      const n = this._pendingNeighborhood
+      const hoodSet = new Set(n.ids || [])
+      hoodSet.add(n.center_id)
+      console.log("[cy] applying neighborhood, center:", n.center_id, "size:", hoodSet.size, "cy nodes:", this.cy.nodes().length)
+      this.cy.elements().unselect()
+      this._applyNeighborhood(hoodSet)
+      const centerNode = this.cy.getElementById(n.center_id)
+      console.log("[cy] center node found:", centerNode.length)
+      if (centerNode.length) centerNode.select()
+    } else {
+      console.log("[cy] _applyPendingOverlay: restore full graph")
+      // Both cleared — restore full graph view
+      this.cy.elements().unselect()
+      this.cy.elements().removeStyle("opacity display background-color border-color border-width")
+    }
+  },
+
+  _applyNeighborhood(hoodSet, centerId) {
     this.cy.nodes().forEach(n => {
       n.style({display: hoodSet.has(n.id()) ? "element" : "none"})
     })
@@ -110,7 +145,26 @@ const CytoscapeGraph = {
       if (ele.isNode()) return hoodSet.has(ele.id())
       return hoodSet.has(ele.source().id()) && hoodSet.has(ele.target().id())
     })
-    if (hoodEles.length) this.cy.fit(hoodEles, 120)
+    if (!hoodEles.length) return
+
+    // Run a force-directed layout on just the visible neighborhood nodes.
+    // cose is fast at this scale (<100 nodes) and shows connection structure well.
+    hoodEles.layout({
+      name: "cose",
+      animate: false,
+      fit: true,
+      padding: 60,
+      nodeDimensionsIncludeLabels: false,
+      // Pin the center node near the middle
+      randomize: false,
+      componentSpacing: 40,
+      nodeRepulsion: () => 4096,
+      idealEdgeLength: () => 80,
+      edgeElasticity: () => 32,
+      gravity: 1.2,
+    }).run()
+
+    this.cy.fit(hoodEles, 60)
   },
 
   _applyFocusMode(neighborhoods) {
@@ -159,10 +213,26 @@ const CytoscapeGraph = {
 
     // Delay layout until after the browser has painted and the container has
     // its real dimensions (the canvas can start at height 0 during LiveView mount).
+    const nodeCount = this.cy.nodes().length
+    const msg = document.getElementById("cy-loading-msg")
+    if (msg && nodeCount > 0) msg.textContent = `Laying out ${nodeCount} nodes…`
     setTimeout(() => {
       this.cy.resize()
-      this.cy.layout(layoutConfig()).run()
-      this.cy.one("layoutstop", () => { this._layoutDone = true })
+      const layout = this.cy.layout(layoutConfig(nodeCount))
+      layout.run()
+      // Hide overlay when layout finishes, with a hard timeout fallback in case
+      // layoutstop never fires (can happen with very large graphs).
+      const fallback = setTimeout(() => {
+        this._layoutDone = true
+        this._hideOverlay()
+        this._applyPendingOverlay()
+      }, 8000)
+      this.cy.one("layoutstop", () => {
+        clearTimeout(fallback)
+        this._layoutDone = true
+        this._hideOverlay()
+        this._applyPendingOverlay()
+      })
     }, 50)
 
     this._resizeObserver = new ResizeObserver(() => this.cy.resize())
@@ -180,82 +250,51 @@ const CytoscapeGraph = {
 
     this.cy.on("mouseover", "node", (evt) => {
       const n = evt.target
-      const c = resolveColors()
-
-      // Determine label placement based on node's position within the canvas.
-      // Avoid painting toward whichever edge the node is closest to.
-      const pan = this.cy.pan()
-      const zoom = this.cy.zoom()
-      const pos = n.position()
-      const canvasW = this._cyContainer.offsetWidth
-      const canvasH = this._cyContainer.offsetHeight
-      // Pixel position of node centre within the container
-      const px = pos.x * zoom + pan.x
-      const py = pos.y * zoom + pan.y
-      const edgeFraction = 0.25 // within 25% of an edge → prefer opposite side
-
-      let valign = "bottom"
-      let halign = "center"
-      let marginY = 6
-      let marginX = 0
-
-      if (py / canvasH < edgeFraction) {
-        valign = "bottom"; marginY = 6
-      } else if (py / canvasH > (1 - edgeFraction)) {
-        valign = "top"; marginY = -6
+      const label = n.data("label") || n.id()
+      const strip = document.getElementById("cy-hover-label")
+      const text = document.getElementById("cy-hover-text")
+      if (strip && text) {
+        text.textContent = label
+        strip.style.display = "flex"
       }
-
-      if (px / canvasW < edgeFraction) {
-        halign = "right"; marginX = 6
-      } else if (px / canvasW > (1 - edgeFraction)) {
-        halign = "left"; marginX = -6
-      }
-
-      n.style({
-        "label": n.data("label"),
-        "text-wrap": "wrap",
-        "text-max-width": "180px",
-        "font-size": "12px",
-        "text-valign": valign,
-        "text-halign": halign,
-        "text-margin-y": marginY,
-        "text-margin-x": marginX,
-        "text-justification": "center",
-        "color": c.content,
-        "text-background-color": "#fefce8",
-        "text-background-opacity": 1,
-        "text-background-padding": "4px",
-        "text-border-width": 1,
-        "text-border-color": "#d4c89a",
-        "text-border-opacity": 1,
-        "z-index": 9999,
-      })
     })
 
-    this.cy.on("mouseout", "node", (evt) => {
-      const n = evt.target
-      n.style({"label": "", "z-index": 0})
+    this.cy.on("mouseout", "node", () => {
+      const strip = document.getElementById("cy-hover-label")
+      if (strip) strip.style.display = "none"
     })
   },
 }
 
-function layoutConfig() {
+function layoutConfig(nodeCount) {
+  // Force-directed layouts (fcose, cose) are O(n²) and unusable beyond ~150 nodes.
+  // For large graphs use concentric layout: places high-degree nodes at centre,
+  // low-degree at the periphery. O(n log n), finishes in milliseconds.
+  if (nodeCount > 150) {
+    return {
+      name: "concentric",
+      animate: false,
+      fit: true,
+      padding: 60,
+      startAngle: 3 / 2 * Math.PI,
+      clockwise: true,
+      equidistant: false,
+      minNodeSpacing: 10,
+      concentric: (node) => node.degree(),
+      levelWidth: () => 3,
+    }
+  }
   return {
     name: "fcose",
-    animate: true,
-    animationDuration: 400,
+    animate: false,
     fit: true,
     padding: 120,
-    // Node separation — minimum distance between node bounding boxes
     nodeSeparation: 80,
-    // Edge length in pixels
     idealEdgeLength: 120,
     edgeElasticity: 0.45,
-    // Incremental layout from random positions
     randomize: true,
-    // Quality: "default" or "proof" (slower but better overlap removal)
     quality: "default",
-    numIter: 2500,
+    numIter: nodeCount > 80 ? 1200 : 2500,
     tile: true,
     tilingPaddingVertical: 20,
     tilingPaddingHorizontal: 20,
@@ -295,8 +334,8 @@ function cytoscapeStyle(c) {
       selector: "node",
       style: {
         "label": "",
-        "width": (ele) => 12 + ele.data("confidence") * 8,
-        "height": (ele) => 12 + ele.data("confidence") * 8,
+        "width": (ele) => nodeSize(ele),
+        "height": (ele) => nodeSize(ele),
         "background-color": (ele) => layerColor(ele.data("corpus_layer"), c),
         "border-width": (ele) => ele.data("human_validated") ? 2 : 0,
         "border-color": "#22c55e",
@@ -309,8 +348,8 @@ function cytoscapeStyle(c) {
         "border-width": 4,
         "border-color": "#f59e0b",
         "background-color": "#f59e0b",
-        "width": (ele) => 18 + ele.data("confidence") * 8,
-        "height": (ele) => 18 + ele.data("confidence") * 8,
+        "width": (ele) => nodeSize(ele) + 6,
+        "height": (ele) => nodeSize(ele) + 6,
       },
     },
     {
@@ -331,6 +370,14 @@ function cytoscapeStyle(c) {
         "line-color": c.neutral,
         "target-arrow-color": c.neutral,
         "width": (ele) => 0.5 + ele.data("confidence") * 2,
+      },
+    },
+    {
+      selector: "edge[?cross_graph]",
+      style: {
+        "line-color": "#f59e0b",
+        "target-arrow-color": "#f59e0b",
+        "opacity": 0.8,
       },
     },
     {
@@ -362,6 +409,15 @@ function certaintyStyle(certainty) {
   if (certainty === "solid")  return "solid"
   if (certainty === "dotted") return "dotted"
   return "dashed"
+}
+
+// Scale node size by degree (connection count): hub nodes are visually larger.
+// Min 6px, max 36px, logarithmic so outlier hubs don't dominate.
+function nodeSize(ele) {
+  const deg = ele.degree()
+  const base = 6
+  const scale = 6
+  return base + Math.log1p(deg) * scale
 }
 
 // ---------------------------------------------------------------------------

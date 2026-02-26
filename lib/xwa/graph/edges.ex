@@ -61,7 +61,10 @@ defmodule Xwa.Graph.Edges do
   end
 
   @doc """
-  Returns all visible edges in a graph for the given user.
+  Returns all visible edges in one or more graphs for the given user.
+
+  `graph_id` may be a single binary UUID or a list of UUIDs (for composite
+  graphs resolved via `Xwa.Graphs.resolve_graph_ids/1`).
 
   Visibility rules:
   - "system" edges are visible to all members
@@ -69,18 +72,23 @@ defmodule Xwa.Graph.Edges do
   - "shared" edges are visible to all (empty shared_with) or listed users
   - Additionally filters out edges where user_id is in hidden_by
   """
-  @spec list(String.t(), String.t()) :: {:ok, [Edge.t()]} | {:error, any()}
+  @spec list(String.t() | [String.t()], String.t()) :: {:ok, [Edge.t()]} | {:error, any()}
   def list(graph_id, user_id) when is_binary(graph_id) and is_binary(user_id) do
+    list([graph_id], user_id)
+  end
+
+  def list(graph_ids, user_id) when is_list(graph_ids) and is_binary(user_id) do
     cypher = """
-    MATCH ()-[r:RELATES {graph_id: $graph_id}]->()
-    WHERE (r.visibility = 'system'
+    MATCH ()-[r:RELATES]->()
+    WHERE r.graph_id IN $graph_ids
+      AND (r.visibility = 'system'
         OR r.created_by = $user_id
         OR (r.visibility = 'shared' AND (size(coalesce(r.shared_with, [])) = 0 OR $user_id IN coalesce(r.shared_with, []))))
       AND NOT $user_id IN coalesce(r.hidden_by, [])
     RETURN r
     """
 
-    case Graph.query(cypher, %{graph_id: graph_id, user_id: user_id}) do
+    case Graph.query(cypher, %{graph_ids: graph_ids, user_id: user_id}) do
       {:ok, rows} -> {:ok, Enum.map(rows, &edge_from_row/1)}
       {:error, reason} -> {:error, reason}
     end

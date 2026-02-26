@@ -19,6 +19,7 @@ defmodule XwaWeb.Router do
     pipe_through :browser
 
     get "/", PageController, :home
+    post "/graph/switch", GraphController, :switch
   end
 
   scope "/", XwaWeb do

@@ -13,6 +13,13 @@ defmodule XwaWeb.SourcesLive do
     text/plain
     text/markdown
     text/html
+    .pdf
+    .docx
+    .odt
+    .txt
+    .md
+    .html
+    .htm
   )
 
   @impl true
@@ -201,7 +208,7 @@ defmodule XwaWeb.SourcesLive do
                 graph_id = socket.assigns.current_scope.graph_id
                 IngestionWorker.run_async(document.id, user_id, graph_id)
 
-                documents = Documents.list_documents()
+                documents = Documents.list_documents_for_graph(socket.assigns.current_scope.graph_id)
 
                 socket =
                   socket
@@ -391,32 +398,39 @@ defmodule XwaWeb.SourcesLive do
                       <span class="text-xs text-base-content/60">{source_type_label(doc.source_type)}</span>
                     </td>
                     <td class="px-4 py-3">
-                      <div class="flex items-center gap-2 flex-wrap">
-                        <span class={[
-                          "inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium capitalize",
-                          status_badge_class(doc.ingestion_status)
-                        ]}>
-                          {doc.ingestion_status}
-                        </span>
-                        <%= if doc.ingestion_status == "failed" do %>
-                          <%= if doc.ingestion_error do %>
+                      <div class="flex flex-col gap-1">
+                        <div class="flex items-center gap-2 flex-wrap">
+                          <span class={[
+                            "inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium capitalize",
+                            status_badge_class(doc.ingestion_status)
+                          ]}>
+                            {doc.ingestion_status}
+                          </span>
+                          <%= if doc.ingestion_status == "failed" do %>
+                            <button
+                              phx-click="retry_ingestion"
+                              phx-value-id={doc.id}
+                              class="inline-flex items-center gap-1 rounded-md bg-warning/15 border border-warning/30 px-2 py-0.5 text-xs font-medium text-warning-content hover:bg-warning/25 transition-colors"
+                            >
+                              <.icon name="hero-arrow-path" class="w-3 h-3" /> Retry
+                            </button>
+                          <% end %>
+                        </div>
+                        <%= if doc.ingestion_status == "failed" && doc.ingestion_error do %>
+                          <div class="flex items-start gap-1 max-w-xs">
+                            <p class="text-xs text-error/70 break-all line-clamp-2" title={doc.ingestion_error}>
+                              {doc.ingestion_error}
+                            </p>
                             <button
                               id={"copy-error-#{doc.id}"}
                               phx-hook="CopyToClipboard"
                               data-clipboard={doc.ingestion_error}
-                              title="Copy error to clipboard"
-                              class="text-error/50 hover:text-error transition-all"
+                              title="Copy full error to clipboard"
+                              class="shrink-0 text-error/40 hover:text-error transition-colors mt-0.5"
                             >
-                              <.icon name="hero-clipboard-document" class="w-4 h-4" />
+                              <.icon name="hero-clipboard-document" class="w-3.5 h-3.5" />
                             </button>
-                          <% end %>
-                          <button
-                            phx-click="retry_ingestion"
-                            phx-value-id={doc.id}
-                            class="inline-flex items-center gap-1 rounded-md bg-warning/15 border border-warning/30 px-2 py-0.5 text-xs font-medium text-warning-content hover:bg-warning/25 transition-colors"
-                          >
-                            <.icon name="hero-arrow-path" class="w-3 h-3" /> Retry
-                          </button>
+                          </div>
                         <% end %>
                       </div>
                     </td>
