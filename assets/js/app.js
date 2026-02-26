@@ -39,7 +39,6 @@ const CytoscapeGraph = {
     this._pendingNeighborhood = null
     this._pendingFocus = null
     this._exploredNodes = []  // ordered array of center IDs, oldest first
-    this._visitedNodes = new Set()  // all node IDs seen in any previous neighborhood
     this._minDegree = 1
     this._inOverlay = false       // true while showing neighborhood or focus overlay
     this._applyingOverlay = false // re-entrancy guard
@@ -60,7 +59,6 @@ const CytoscapeGraph = {
       this._pendingNeighborhood = null
       this._pendingFocus = null
       this._exploredNodes = []
-      this._visitedNodes = new Set()
       this._minDegree = data.min_degree || 1
       this._inOverlay = false
       this._applyingOverlay = false
@@ -105,30 +103,20 @@ const CytoscapeGraph = {
 
   _showOverlay() {
     const overlay = document.getElementById("cy-loading")
-    if (overlay) {
-      console.log("[cy] showOverlay")
-      overlay.classList.remove("opacity-0", "pointer-events-none")
-    }
+    if (overlay) overlay.classList.remove("opacity-0", "pointer-events-none")
   },
 
   _hideOverlay() {
     const overlay = document.getElementById("cy-loading")
-    if (overlay) {
-      console.log("[cy] hideOverlay")
-      overlay.classList.add("opacity-0", "pointer-events-none")
-    }
+    if (overlay) overlay.classList.add("opacity-0", "pointer-events-none")
   },
 
   _applyPendingOverlay() {
     if (!this.cy) return
-    if (this._applyingOverlay) {
-      console.log("[cy] _applyPendingOverlay: skipping re-entrant call")
-      return
-    }
+    if (this._applyingOverlay) return
     this._applyingOverlay = true
     try {
       if (this._pendingFocus) {
-        console.log("[cy] _applyPendingOverlay: focus mode")
         this._inOverlay = true
         this.cy.elements().unselect()
         this._applyFocusMode(this._pendingFocus)
@@ -136,41 +124,30 @@ const CytoscapeGraph = {
         const n = this._pendingNeighborhood
         const hoodSet = new Set(n.ids || [])
         hoodSet.add(n.center_id)
-        console.log("[cy] applying neighborhood, center:", n.center_id, "size:", hoodSet.size, "cy nodes:", this.cy.nodes().length)
         this.cy.elements().unselect()
         const existingIdx = this._exploredNodes.indexOf(n.center_id)
-        console.log("[cy] exploredNodes before:", [...this._exploredNodes], "existingIdx:", existingIdx)
         if (existingIdx !== -1) {
-          // Keep L2 itself as the current (last) entry; drop everything after it
+          // Keep this node as the current (last) entry; drop everything after it
           this._exploredNodes = this._exploredNodes.slice(0, existingIdx + 1)
-          this._visitedNodes = new Set(this._exploredNodes)
         } else {
-          hoodSet.forEach(id => this._visitedNodes.add(id))
-          this._visitedNodes.delete(n.center_id)
           this._exploredNodes.push(n.center_id)
         }
-        console.log("[cy] exploredNodes after:", [...this._exploredNodes])
         this._pendingNeighborhood = null  // clear before _applyNeighborhood to prevent re-entrant layoutstop re-apply
         this._inOverlay = true
         this._applyNeighborhood(hoodSet, n.center_id)
         const centerNode = this.cy.getElementById(n.center_id)
-        console.log("[cy] center node found:", centerNode.length)
         if (centerNode.length) centerNode.select()
       } else if (this._inOverlay) {
         // Only restore full graph if we were actually showing an overlay.
         // This prevents a spurious "restore" when _applyPendingOverlay is called
         // with nothing pending after the initial layout completes.
-        console.log("[cy] _applyPendingOverlay: restore full graph")
         this._inOverlay = false
         this._exploredNodes = []
-        this._visitedNodes = new Set()
         this._renderExploredLabels()
         this.cy.elements().unselect()
         this.cy.elements().removeStyle("opacity display background-color border-color border-width")
         this._applyDegreeFilter()
         this.cy.fit(80)
-      } else {
-        console.log("[cy] _applyPendingOverlay: nothing to do (no pending, no overlay active)")
       }
     } finally {
       this._applyingOverlay = false
@@ -530,15 +507,6 @@ function cytoscapeStyle(c) {
   ]
 }
 
-function layerColor(layer, c) {
-  const colors = {
-    self_description: c.primary,
-    internal_record:  c.secondary,
-    external_context: c.accent,
-  }
-  return colors[layer] || c.neutral
-}
-
 function certaintyStyle(certainty) {
   if (certainty === "solid")  return "solid"
   if (certainty === "dotted") return "dotted"
@@ -593,14 +561,8 @@ const CopyToClipboard = {
       const text = this.el.dataset.clipboard
       if (!text) return
       navigator.clipboard.writeText(text).then(() => {
-        const icon = this.el.querySelector("[data-copy-icon]")
-        const orig = icon ? icon.getAttribute("data-orig-name") : null
-        if (icon) {
-          icon.setAttribute("data-orig-name", icon.dataset.name || "")
-          // Show a brief "copied" cue by swapping opacity
-          this.el.style.opacity = "0.4"
-          setTimeout(() => { this.el.style.opacity = "" }, 600)
-        }
+        this.el.style.opacity = "0.4"
+        setTimeout(() => { this.el.style.opacity = "" }, 600)
       })
     })
   }
