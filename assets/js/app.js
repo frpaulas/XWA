@@ -38,6 +38,7 @@ const CytoscapeGraph = {
     this._layoutDone = false
     this._pendingNeighborhood = null
     this._pendingFocus = null
+    this._exploredNodes = new Set()
     // Mount Cytoscape on a stable child div, not this.el directly.
     // LiveView patches this.el's attributes on updates but never touches its children,
     // so the canvas elements survive across LiveView re-renders.
@@ -54,6 +55,7 @@ const CytoscapeGraph = {
       this._layoutDone = false
       this._pendingNeighborhood = null
       this._pendingFocus = null
+      this._exploredNodes.clear()
       if (data.full_reload) this._showOverlay()
       this.initCy(data)
     })
@@ -121,15 +123,19 @@ const CytoscapeGraph = {
       hoodSet.add(n.center_id)
       console.log("[cy] applying neighborhood, center:", n.center_id, "size:", hoodSet.size, "cy nodes:", this.cy.nodes().length)
       this.cy.elements().unselect()
-      this._applyNeighborhood(hoodSet)
+      this._exploredNodes.add(n.center_id)
+      this._applyNeighborhood(hoodSet, n.center_id)
       const centerNode = this.cy.getElementById(n.center_id)
       console.log("[cy] center node found:", centerNode.length)
       if (centerNode.length) centerNode.select()
     } else {
       console.log("[cy] _applyPendingOverlay: restore full graph")
+      this._exploredNodes.clear()
+      this._renderExploredLabels()
       // Both cleared — restore full graph view
       this.cy.elements().unselect()
       this.cy.elements().removeStyle("opacity display background-color border-color border-width")
+      this.cy.fit(80)
     }
   },
 
@@ -147,24 +153,41 @@ const CytoscapeGraph = {
     })
     if (!hoodEles.length) return
 
-    // Run a force-directed layout on just the visible neighborhood nodes.
-    // cose is fast at this scale (<100 nodes) and shows connection structure well.
+    // Concentric layout on the neighborhood subgraph — same visual language as
+    // the full graph. Use local degree (edges within the hood only) so the
+    // selected center node lands in the middle ring correctly.
+    const hoodNodeIds = new Set(hoodEles.nodes().map(n => n.id()))
     hoodEles.layout({
-      name: "cose",
+      name: "concentric",
       animate: false,
       fit: true,
       padding: 60,
-      nodeDimensionsIncludeLabels: false,
-      // Pin the center node near the middle
-      randomize: false,
-      componentSpacing: 40,
-      nodeRepulsion: () => 4096,
-      idealEdgeLength: () => 80,
-      edgeElasticity: () => 32,
-      gravity: 1.2,
+      startAngle: 3 / 2 * Math.PI,
+      clockwise: true,
+      equidistant: false,
+      minNodeSpacing: 20,
+      concentric: (node) => node.connectedEdges().filter(e =>
+        hoodNodeIds.has(e.source().id()) && hoodNodeIds.has(e.target().id())
+      ).length,
+      levelWidth: () => 2,
     }).run()
 
     this.cy.fit(hoodEles, 60)
+    this._renderExploredLabels()
+  },
+
+  _renderExploredLabels() {
+    const container = document.getElementById("cy-explored-labels")
+    if (!container) return
+    container.innerHTML = ""
+    this._exploredNodes.forEach(id => {
+      const node = this.cy && this.cy.getElementById(id)
+      const label = (node && node.length) ? (node.data("label") || id) : id
+      const el = document.createElement("span")
+      el.textContent = label
+      el.className = "text-xs font-medium px-2 py-0.5 rounded bg-primary/80 text-primary-content truncate max-w-full"
+      container.appendChild(el)
+    })
   },
 
   _applyFocusMode(neighborhoods) {
@@ -251,17 +274,26 @@ const CytoscapeGraph = {
     this.cy.on("mouseover", "node", (evt) => {
       const n = evt.target
       const label = n.data("label") || n.id()
-      const strip = document.getElementById("cy-hover-label")
       const text = document.getElementById("cy-hover-text")
-      if (strip && text) {
+      if (text) {
         text.textContent = label
-        strip.style.display = "flex"
+        text.style.display = "block"
       }
+      n.connectedEdges().forEach(e => {
+        const col = edgeTypeColor(e.data("type"))
+        e.style({"line-color": col, "target-arrow-color": col, "width": 4, "opacity": 1})
+      })
+      n.neighborhood("node").forEach(nb => {
+        if (nb.id() !== n.id()) nb.style({"border-width": 2, "border-color": "#f59e0b"})
+      })
     })
 
-    this.cy.on("mouseout", "node", () => {
-      const strip = document.getElementById("cy-hover-label")
-      if (strip) strip.style.display = "none"
+    this.cy.on("mouseout", "node", (evt) => {
+      const n = evt.target
+      const text = document.getElementById("cy-hover-text")
+      if (text) text.style.display = "none"
+      n.connectedEdges().removeStyle("line-color target-arrow-color width opacity")
+      n.neighborhood("node").removeStyle("border-width border-color")
     })
   },
 }
@@ -336,9 +368,9 @@ function cytoscapeStyle(c) {
         "label": "",
         "width": (ele) => nodeSize(ele),
         "height": (ele) => nodeSize(ele),
-        "background-color": (ele) => layerColor(ele.data("corpus_layer"), c),
+        "background-color": (ele) => nodeColor(ele),
         "border-width": (ele) => ele.data("human_validated") ? 2 : 0,
-        "border-color": "#22c55e",
+        "border-color": "#ffffff",
       },
     },
     {
@@ -411,13 +443,43 @@ function certaintyStyle(certainty) {
   return "dashed"
 }
 
+// Assign one of 3 colors to an edge based on its type string.
+// Uses a simple hash so any type always maps to the same color,
+// and new/unknown types are handled gracefully.
+// Colors: sky blue, violet, rose — distinct and readable on both light/dark.
+const EDGE_COLORS = ["#38bdf8", "#a78bfa", "#fb7185"]
+function edgeTypeColor(type) {
+  if (!type) return EDGE_COLORS[0]
+  let hash = 0
+  for (let i = 0; i < type.length; i++) hash = (hash * 31 + type.charCodeAt(i)) | 0
+  return EDGE_COLORS[Math.abs(hash) % EDGE_COLORS.length]
+}
+
 // Scale node size by degree (connection count): hub nodes are visually larger.
-// Min 6px, max 36px, logarithmic so outlier hubs don't dominate.
+// Isolated nodes (deg=0) are sized the same as a 2-edge node so they don't
+// look like dead pixels. Min ~13px, max ~42px, logarithmic scale.
 function nodeSize(ele) {
-  const deg = ele.degree()
+  const deg = Math.max(ele.degree(), 2)
   const base = 6
   const scale = 6
   return base + Math.log1p(deg) * scale
+}
+
+// Color nodes by connectivity:
+//   - No edges → red (isolated, possibly orphaned claims)
+//   - Has edges → green, bright at high degree fading to dim at low degree
+// Uses HSL so the hue stays green (120°) while lightness drops with distance from center.
+function nodeColor(ele) {
+  const deg = ele.degree()
+  if (deg === 0) return "#ef4444"  // red-500
+
+  // Map degree logarithmically to a lightness range: 65% (dim) → 45% (bright)
+  // High-degree nodes get a richer, more saturated green.
+  const maxDeg = Math.max(ele.cy().nodes().maxDegree(), 1)
+  const t = Math.log1p(deg) / Math.log1p(maxDeg)  // 0..1, 1 = most connected
+  const lightness = Math.round(75 - t * 45)        // 75% very pale → 30% deep rich green
+  const saturation = Math.round(40 + t * 55)       // 40% washed out → 95% vivid
+  return `hsl(120, ${saturation}%, ${lightness}%)`
 }
 
 // ---------------------------------------------------------------------------

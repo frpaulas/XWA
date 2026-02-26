@@ -871,13 +871,15 @@ defmodule XwaWeb.GraphLive do
               <p class="text-xs text-base-content/40 mt-1">Import a document to get started</p>
             </div>
           <% end %>
-          <%!-- Hover label strip: JS updates this on node mouseover/mouseout --%>
+          <%!-- Canvas label panel: explored trail + hover label, upper-left corner --%>
           <div
-            id="cy-hover-label"
-            class="absolute top-0 left-0 right-0 z-20 pointer-events-none px-4 py-2 min-h-[2.25rem] flex items-center"
-            style="display:none;"
+            id="cy-label-panel"
+            class="absolute top-3 left-3 z-20 pointer-events-none flex flex-col gap-1 max-w-xs"
           >
-            <span id="cy-hover-text" class="text-sm font-medium text-base-content bg-base-100/90 backdrop-blur-sm px-3 py-1 rounded-lg shadow border border-base-300 max-w-full truncate"></span>
+            <%!-- Explored node labels accumulate here --%>
+            <div id="cy-explored-labels" class="flex flex-col gap-1"></div>
+            <%!-- Current hover label sits below the trail --%>
+            <span id="cy-hover-text" class="text-sm font-medium text-base-content bg-base-100/90 backdrop-blur-sm px-3 py-1 rounded-lg shadow border border-base-300 truncate" style="display:none;"></span>
           </div>
           <%!-- Canvas: always in DOM so LiveView patches rather than replaces it --%>
           <div
