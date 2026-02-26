@@ -15,6 +15,7 @@ defmodule XwaWeb.GraphLive do
       |> assign(:neighborhood, nil)
       |> assign(:filter_layer, "all")
       |> assign(:filter_type, "all")
+      |> assign(:filter_min_degree, 2)
       |> assign(:search, "")
       |> assign(:nodes, [])
       |> assign(:all_edges, [])
@@ -225,16 +226,14 @@ defmodule XwaWeb.GraphLive do
         {[], []}
       end
 
-    composite_graph_id = composite_id(socket)
-    graph_data = build_graph_data(nodes, edges, composite_graph_id)
+    min_degree = auto_threshold(nodes, edges)
 
     socket =
       socket
       |> assign(:loading, false)
       |> assign(:nodes, nodes)
       |> assign(:all_edges, edges)
-      |> assign(:graph_data, graph_data)
-      |> push_event("graph_loaded", Map.put(graph_data, :full_reload, true))
+      |> apply_filters(socket.assigns.filter_layer, socket.assigns.filter_type, socket.assigns.search, min_degree, true)
 
     {:noreply, socket}
   end
@@ -445,6 +444,12 @@ defmodule XwaWeb.GraphLive do
     {:noreply, socket}
   end
 
+  def handle_event("filter_min_degree", %{"min_degree" => val}, socket) do
+    min_degree = String.to_integer(val)
+    socket = apply_filters(socket, socket.assigns.filter_layer, socket.assigns.filter_type, socket.assigns.search, min_degree, true)
+    {:noreply, socket}
+  end
+
   # ---------------------------------------------------------------------------
   # Private
   # ---------------------------------------------------------------------------
@@ -453,7 +458,8 @@ defmodule XwaWeb.GraphLive do
     Edges.list(graph_ids, user_id)
   end
 
-  defp apply_filters(socket, layer, type, search) do
+  defp apply_filters(socket, layer, type, search, min_degree \\ nil, full_reload \\ false) do
+    min_degree = min_degree || socket.assigns.filter_min_degree
     nodes = socket.assigns.nodes
 
     filtered =
@@ -473,12 +479,21 @@ defmodule XwaWeb.GraphLive do
 
     graph_data = build_graph_data(filtered, filtered_edges, composite_id(socket))
 
+    # Pass min_degree to the JS hook so it can hide low-degree nodes via CSS
+    # display:none rather than removing them from Cytoscape's element set.
+    # This keeps all nodes available for neighborhood display.
+    event_data =
+      graph_data
+      |> Map.put(:min_degree, min_degree)
+      |> then(&if full_reload, do: Map.put(&1, :full_reload, true), else: &1)
+
     socket
     |> assign(:filter_layer, layer)
     |> assign(:filter_type, type)
+    |> assign(:filter_min_degree, min_degree)
     |> assign(:search, search)
     |> assign(:graph_data, graph_data)
-    |> push_event("graph_loaded", graph_data)
+    |> push_event("graph_loaded", event_data)
   end
 
   # Push canvas overlay events to the hook whenever neighborhood or focus changes.
@@ -551,6 +566,29 @@ defmodule XwaWeb.GraphLive do
     |> Enum.reject(&is_nil/1)
     |> Enum.uniq()
     |> Enum.sort()
+  end
+
+  # Compute the minimum degree threshold that yields 250–350 visible nodes.
+  # Tries thresholds 1..20 and picks the lowest that keeps node count <= 350.
+  # If the full graph has <= 250 nodes, returns 0 (show orphans too).
+  # If even threshold=20 gives >350, returns 20 (keep pruning).
+  defp auto_threshold(nodes, edges) do
+    total = length(nodes)
+    if total <= 250 do
+      0
+    else
+      edge_counts =
+        Enum.reduce(edges, %{}, fn e, acc ->
+          acc
+          |> Map.update(e.from_node_id, 1, &(&1 + 1))
+          |> Map.update(e.to_node_id, 1, &(&1 + 1))
+        end)
+
+      Enum.find(1..20, 20, fn threshold ->
+        count = Enum.count(nodes, fn n -> Map.get(edge_counts, n.id, 0) >= threshold end)
+        count <= 350
+      end)
+    end
   end
 
   defp corpus_layer_label("self_description"), do: "Self-description"
@@ -691,6 +729,27 @@ defmodule XwaWeb.GraphLive do
                 name="q"
                 class="w-full rounded-lg border border-base-300 bg-base-200/50 pl-8 pr-3 py-2 text-xs text-base-content placeholder:text-base-content/35 focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary transition-colors"
               />
+            </div>
+
+            <%!-- Min connections slider --%>
+            <div class="mb-4">
+              <div class="flex items-center justify-between mb-1.5">
+                <p class="text-xs font-medium text-base-content/50">Min connections</p>
+                <span id="cy-degree-label" class="text-xs font-semibold text-primary"><%= @filter_min_degree %></span>
+              </div>
+              <input
+                id="cy-degree-slider"
+                type="range"
+                min="1" max="10"
+                value={@filter_min_degree}
+                phx-hook="DegreeSlider"
+                phx-update="ignore"
+                class="w-full accent-primary"
+              />
+              <div class="flex justify-between text-xs text-base-content/30 mt-0.5">
+                <span>All</span>
+                <span>10+</span>
+              </div>
             </div>
 
             <%!-- Corpus layer --%>

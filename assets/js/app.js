@@ -39,6 +39,7 @@ const CytoscapeGraph = {
     this._pendingNeighborhood = null
     this._pendingFocus = null
     this._exploredNodes = new Set()
+    this._minDegree = 1
     // Mount Cytoscape on a stable child div, not this.el directly.
     // LiveView patches this.el's attributes on updates but never touches its children,
     // so the canvas elements survive across LiveView re-renders.
@@ -56,6 +57,7 @@ const CytoscapeGraph = {
       this._pendingNeighborhood = null
       this._pendingFocus = null
       this._exploredNodes.clear()
+      this._minDegree = data.min_degree || 1
       if (data.full_reload) this._showOverlay()
       this.initCy(data)
     })
@@ -132,9 +134,10 @@ const CytoscapeGraph = {
       console.log("[cy] _applyPendingOverlay: restore full graph")
       this._exploredNodes.clear()
       this._renderExploredLabels()
-      // Both cleared — restore full graph view
+      // Both cleared — restore full graph view, then re-apply degree filter
       this.cy.elements().unselect()
       this.cy.elements().removeStyle("opacity display background-color border-color border-width")
+      this._applyDegreeFilter()
       this.cy.fit(80)
     }
   },
@@ -174,6 +177,19 @@ const CytoscapeGraph = {
 
     this.cy.fit(hoodEles, 60)
     this._renderExploredLabels()
+  },
+
+  _applyDegreeFilter() {
+    if (!this.cy || this._minDegree <= 1) return
+    const min = this._minDegree
+    this.cy.nodes().forEach(n => {
+      const deg = n.degree()
+      n.style({display: deg >= min ? "element" : "none"})
+    })
+    this.cy.edges().forEach(e => {
+      const show = e.source().style("display") !== "none" && e.target().style("display") !== "none"
+      e.style({display: show ? "element" : "none"})
+    })
   },
 
   _renderExploredLabels() {
@@ -247,12 +263,14 @@ const CytoscapeGraph = {
       // layoutstop never fires (can happen with very large graphs).
       const fallback = setTimeout(() => {
         this._layoutDone = true
+        this._applyDegreeFilter()
         this._hideOverlay()
         this._applyPendingOverlay()
       }, 8000)
       this.cy.one("layoutstop", () => {
         clearTimeout(fallback)
         this._layoutDone = true
+        this._applyDegreeFilter()
         this._hideOverlay()
         this._applyPendingOverlay()
       })
@@ -529,11 +547,30 @@ const MonacoFix = {
   }
 }
 
+// ---------------------------------------------------------------------------
+// DegreeSlider hook — updates label live while dragging, pushes server event
+// only on mouseup so the graph doesn't rebuild on every tick.
+// ---------------------------------------------------------------------------
+const DegreeSlider = {
+  mounted() {
+    const label = document.getElementById("cy-degree-label")
+    const input = this.el
+
+    input.addEventListener("input", () => {
+      if (label) label.textContent = input.value
+    })
+
+    input.addEventListener("change", () => {
+      this.pushEvent("filter_min_degree", {min_degree: input.value})
+    })
+  }
+}
+
 const csrfToken = document.querySelector("meta[name='csrf-token']").getAttribute("content")
 const liveSocket = new LiveSocket("/live", Socket, {
   longPollFallbackMs: 2500,
   params: {_csrf_token: csrfToken},
-  hooks: {...colocatedHooks, CytoscapeGraph, CodeEditorHook, MonacoFix, CopyToClipboard},
+  hooks: {...colocatedHooks, CytoscapeGraph, CodeEditorHook, MonacoFix, CopyToClipboard, DegreeSlider},
 })
 
 // Show progress bar on live navigation and form submits
