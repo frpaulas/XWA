@@ -38,8 +38,11 @@ const CytoscapeGraph = {
     this._layoutDone = false
     this._pendingNeighborhood = null
     this._pendingFocus = null
-    this._exploredNodes = new Set()
+    this._exploredNodes = []  // ordered array of center IDs, oldest first
+    this._visitedNodes = new Set()  // all node IDs seen in any previous neighborhood
     this._minDegree = 1
+    this._inOverlay = false       // true while showing neighborhood or focus overlay
+    this._applyingOverlay = false // re-entrancy guard
     // Mount Cytoscape on a stable child div, not this.el directly.
     // LiveView patches this.el's attributes on updates but never touches its children,
     // so the canvas elements survive across LiveView re-renders.
@@ -56,8 +59,11 @@ const CytoscapeGraph = {
       this._layoutDone = false
       this._pendingNeighborhood = null
       this._pendingFocus = null
-      this._exploredNodes.clear()
+      this._exploredNodes = []
+      this._visitedNodes = new Set()
       this._minDegree = data.min_degree || 1
+      this._inOverlay = false
+      this._applyingOverlay = false
       if (data.full_reload) this._showOverlay()
       this.initCy(data)
     })
@@ -115,30 +121,59 @@ const CytoscapeGraph = {
 
   _applyPendingOverlay() {
     if (!this.cy) return
-    if (this._pendingFocus) {
-      console.log("[cy] _applyPendingOverlay: focus mode")
-      this.cy.elements().unselect()
-      this._applyFocusMode(this._pendingFocus)
-    } else if (this._pendingNeighborhood) {
-      const n = this._pendingNeighborhood
-      const hoodSet = new Set(n.ids || [])
-      hoodSet.add(n.center_id)
-      console.log("[cy] applying neighborhood, center:", n.center_id, "size:", hoodSet.size, "cy nodes:", this.cy.nodes().length)
-      this.cy.elements().unselect()
-      this._exploredNodes.add(n.center_id)
-      this._applyNeighborhood(hoodSet, n.center_id)
-      const centerNode = this.cy.getElementById(n.center_id)
-      console.log("[cy] center node found:", centerNode.length)
-      if (centerNode.length) centerNode.select()
-    } else {
-      console.log("[cy] _applyPendingOverlay: restore full graph")
-      this._exploredNodes.clear()
-      this._renderExploredLabels()
-      // Both cleared — restore full graph view, then re-apply degree filter
-      this.cy.elements().unselect()
-      this.cy.elements().removeStyle("opacity display background-color border-color border-width")
-      this._applyDegreeFilter()
-      this.cy.fit(80)
+    if (this._applyingOverlay) {
+      console.log("[cy] _applyPendingOverlay: skipping re-entrant call")
+      return
+    }
+    this._applyingOverlay = true
+    try {
+      if (this._pendingFocus) {
+        console.log("[cy] _applyPendingOverlay: focus mode")
+        this._inOverlay = true
+        this.cy.elements().unselect()
+        this._applyFocusMode(this._pendingFocus)
+      } else if (this._pendingNeighborhood) {
+        const n = this._pendingNeighborhood
+        const hoodSet = new Set(n.ids || [])
+        hoodSet.add(n.center_id)
+        console.log("[cy] applying neighborhood, center:", n.center_id, "size:", hoodSet.size, "cy nodes:", this.cy.nodes().length)
+        this.cy.elements().unselect()
+        const existingIdx = this._exploredNodes.indexOf(n.center_id)
+        console.log("[cy] exploredNodes before:", [...this._exploredNodes], "existingIdx:", existingIdx)
+        if (existingIdx !== -1) {
+          // Keep L2 itself as the current (last) entry; drop everything after it
+          this._exploredNodes = this._exploredNodes.slice(0, existingIdx + 1)
+          this._visitedNodes = new Set(this._exploredNodes)
+        } else {
+          hoodSet.forEach(id => this._visitedNodes.add(id))
+          this._visitedNodes.delete(n.center_id)
+          this._exploredNodes.push(n.center_id)
+        }
+        console.log("[cy] exploredNodes after:", [...this._exploredNodes])
+        this._pendingNeighborhood = null  // clear before _applyNeighborhood to prevent re-entrant layoutstop re-apply
+        this._inOverlay = true
+        this._applyNeighborhood(hoodSet, n.center_id)
+        const centerNode = this.cy.getElementById(n.center_id)
+        console.log("[cy] center node found:", centerNode.length)
+        if (centerNode.length) centerNode.select()
+      } else if (this._inOverlay) {
+        // Only restore full graph if we were actually showing an overlay.
+        // This prevents a spurious "restore" when _applyPendingOverlay is called
+        // with nothing pending after the initial layout completes.
+        console.log("[cy] _applyPendingOverlay: restore full graph")
+        this._inOverlay = false
+        this._exploredNodes = []
+        this._visitedNodes = new Set()
+        this._renderExploredLabels()
+        this.cy.elements().unselect()
+        this.cy.elements().removeStyle("opacity display background-color border-color border-width")
+        this._applyDegreeFilter()
+        this.cy.fit(80)
+      } else {
+        console.log("[cy] _applyPendingOverlay: nothing to do (no pending, no overlay active)")
+      }
+    } finally {
+      this._applyingOverlay = false
     }
   },
 
@@ -156,9 +191,7 @@ const CytoscapeGraph = {
     })
     if (!hoodEles.length) return
 
-    // Concentric layout on the neighborhood subgraph — same visual language as
-    // the full graph. Use local degree (edges within the hood only) so the
-    // selected center node lands in the middle ring correctly.
+    // Concentric layout — center node has highest local degree so lands at center.
     const hoodNodeIds = new Set(hoodEles.nodes().map(n => n.id()))
     hoodEles.layout({
       name: "concentric",
@@ -176,6 +209,27 @@ const CytoscapeGraph = {
     }).run()
 
     this.cy.fit(hoodEles, 60)
+
+    // Mark previous centers purple and force them visible even if not in hoodSet.
+    // They need to be shown so the user can see and tap the back-path.
+    this._exploredNodes.forEach(id => {
+      if (id === centerId) return
+      const node = this.cy.getElementById(id)
+      if (!node.length) return
+      node.style({
+        "display": "element",
+        "background-color": "#8b5cf6",
+        "border-color": "#8b5cf6",
+        "border-width": 3,
+        "opacity": 1,
+      })
+      // Also show edges connecting this back-node to the current hood
+      node.connectedEdges().forEach(e => {
+        const otherId = e.source().id() === id ? e.target().id() : e.source().id()
+        if (hoodSet.has(otherId)) e.style({display: "element"})
+      })
+    })
+
     this._renderExploredLabels()
   },
 
@@ -196,12 +250,34 @@ const CytoscapeGraph = {
     const container = document.getElementById("cy-explored-labels")
     if (!container) return
     container.innerHTML = ""
-    this._exploredNodes.forEach(id => {
+    // All entries except the last are previous centers — render as back buttons.
+    // The last entry is the current center — render as a plain (non-clickable) label.
+    this._exploredNodes.forEach((id, idx) => {
       const node = this.cy && this.cy.getElementById(id)
       const label = (node && node.length) ? (node.data("label") || id) : id
-      const el = document.createElement("span")
-      el.textContent = label
-      el.className = "text-xs font-medium px-2 py-0.5 rounded bg-primary/80 text-primary-content truncate max-w-full"
+      const isCurrent = idx === this._exploredNodes.length - 1
+      const el = document.createElement("button")
+      el.title = isCurrent ? "Current node" : `Back to: ${label}`
+      el.style.cssText = "display:flex;align-items:center;gap:4px;text-align:left;max-width:220px;min-width:0;"
+      el.className = [
+        "text-xs font-medium px-2 py-1 rounded transition-colors",
+        isCurrent
+          ? "bg-primary/80 text-primary-content cursor-default"
+          : "bg-violet-500/80 text-white hover:bg-violet-400 cursor-pointer",
+      ].join(" ")
+      if (!isCurrent) {
+        const arrow = document.createElement("span")
+        arrow.textContent = "←"
+        arrow.style.flexShrink = "0"
+        el.appendChild(arrow)
+      }
+      const text = document.createElement("span")
+      text.textContent = label
+      text.style.cssText = "overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"
+      el.appendChild(text)
+      if (!isCurrent) {
+        el.addEventListener("click", () => this.pushEvent("unwind_to", {id}))
+      }
       container.appendChild(el)
     })
   },
@@ -280,7 +356,15 @@ const CytoscapeGraph = {
     this._resizeObserver.observe(this.el)
 
     this.cy.on("tap", "node", (evt) => {
-      this.pushEvent("node_selected", {id: evt.target.id()})
+      const id = evt.target.id()
+      const currentCenter = this._exploredNodes[this._exploredNodes.length - 1]
+      // If this is a previous center (not the current one), unwind back to it
+      const prevIdx = this._exploredNodes.indexOf(id)
+      if (prevIdx !== -1 && id !== currentCenter) {
+        this.pushEvent("unwind_to", {id})
+      } else {
+        this.pushEvent("node_selected", {id})
+      }
     })
 
     this.cy.on("tap", (evt) => {

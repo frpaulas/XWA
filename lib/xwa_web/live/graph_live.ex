@@ -128,6 +128,24 @@ defmodule XwaWeb.GraphLive do
     end
   end
 
+  def handle_event("unwind_to", %{"id" => target_id}, socket) do
+    # Pop selection_history until we find the entry where selected_node.id == target_id
+    history = socket.assigns.selection_history
+    case Enum.split_while(history, fn %{selected_node: n} -> n && n.id != target_id end) do
+      {_discarded, [%{selected_node: node, neighborhood: neighborhood} | rest]} ->
+        socket = assign(socket,
+          selected_node: node,
+          neighborhood: neighborhood,
+          selection_history: rest,
+          confirm_delete_edge: nil
+        )
+        {:noreply, push_canvas_events(socket)}
+      _ ->
+        # Target not found in history — ignore
+        {:noreply, socket}
+    end
+  end
+
   def handle_event("deselect", _params, socket) do
     socket = assign(socket, selected_node: nil, neighborhood: nil, connect_from: nil, new_edge_modal: nil, confirm_delete_edge: nil, selection_history: [])
     {:noreply, push_canvas_events(socket)}
@@ -933,12 +951,13 @@ defmodule XwaWeb.GraphLive do
           <%!-- Canvas label panel: explored trail + hover label, upper-left corner --%>
           <div
             id="cy-label-panel"
-            class="absolute top-3 left-3 z-20 pointer-events-none flex flex-col gap-1 max-w-xs"
+            phx-update="ignore"
+            class="absolute top-3 left-3 z-20 flex flex-col gap-1 max-w-xs"
           >
-            <%!-- Explored node labels accumulate here --%>
+            <%!-- Explored node labels — clickable back buttons --%>
             <div id="cy-explored-labels" class="flex flex-col gap-1"></div>
             <%!-- Current hover label sits below the trail --%>
-            <span id="cy-hover-text" class="text-sm font-medium text-base-content bg-base-100/90 backdrop-blur-sm px-3 py-1 rounded-lg shadow border border-base-300 truncate" style="display:none;"></span>
+            <span id="cy-hover-text" class="pointer-events-none text-sm font-medium text-base-content bg-base-100/90 backdrop-blur-sm px-3 py-1 rounded-lg shadow border border-base-300 truncate" style="display:none;"></span>
           </div>
           <%!-- Canvas: always in DOM so LiveView patches rather than replaces it --%>
           <div
