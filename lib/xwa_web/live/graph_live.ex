@@ -551,6 +551,7 @@ defmodule XwaWeb.GraphLive do
             id: n.id,
             label: n.summary || n.content,
             type: n.type || "unknown",
+            node_type: n.node_type || "claim",
             corpus_layer: n.corpus_layer || "unknown",
             confidence: n.confidence || 1.0,
             human_validated: n.human_validated || false,
@@ -771,86 +772,101 @@ defmodule XwaWeb.GraphLive do
             </div>
 
             <%!-- Corpus layer --%>
-            <p class="text-xs font-medium text-base-content/50 mb-1.5">Corpus layer</p>
-            <div class="space-y-1 mb-4">
-              <%= for {label, value} <- [{"All layers", "all"}, {"Self-description", "self_description"}, {"Internal record", "internal_record"}, {"External context", "external_context"}] do %>
-                <button
-                  phx-click="filter_layer"
-                  phx-value-layer={value}
-                  class={[
-                    "w-full text-left px-2.5 py-1.5 rounded-lg text-xs transition-colors",
-                    if(@filter_layer == value,
-                      do: "bg-primary/10 text-primary font-medium",
-                      else: "text-base-content/60 hover:bg-base-200 hover:text-base-content"
-                    )
-                  ]}
-                >
-                  {label}
-                </button>
-              <% end %>
-            </div>
-
-            <%!-- Claim type --%>
-            <%= if @node_types != [] do %>
-              <p class="text-xs font-medium text-base-content/50 mb-1.5">Claim type</p>
+            <details class="group mb-4" open>
+              <summary class="flex items-center justify-between cursor-pointer list-none [&::-webkit-details-marker]:hidden mb-1.5">
+                <span class="text-xs font-medium text-base-content/50">Corpus layer</span>
+                <svg class="w-3 h-3 text-base-content/40 transition-transform group-open:rotate-180" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7" /></svg>
+              </summary>
               <div class="space-y-1">
-                <button
-                  phx-click="filter_type"
-                  phx-value-type="all"
-                  class={[
-                    "w-full text-left px-2.5 py-1.5 rounded-lg text-xs transition-colors",
-                    if(@filter_type == "all",
-                      do: "bg-primary/10 text-primary font-medium",
-                      else: "text-base-content/60 hover:bg-base-200 hover:text-base-content"
-                    )
-                  ]}
-                >
-                  All types
-                </button>
-                <%= for type <- @node_types do %>
+                <%= for {label, value} <- [{"All layers", "all"}, {"Self-description", "self_description"}, {"Internal record", "internal_record"}, {"External context", "external_context"}] do %>
                   <button
-                    phx-click="filter_type"
-                    phx-value-type={type}
+                    phx-click="filter_layer"
+                    phx-value-layer={value}
                     class={[
-                      "w-full text-left px-2.5 py-1.5 rounded-lg text-xs capitalize transition-colors",
-                      if(@filter_type == type,
+                      "w-full text-left px-2.5 py-1.5 rounded-lg text-xs transition-colors",
+                      if(@filter_layer == value,
                         do: "bg-primary/10 text-primary font-medium",
                         else: "text-base-content/60 hover:bg-base-200 hover:text-base-content"
                       )
                     ]}
                   >
-                    {type}
+                    {label}
                   </button>
                 <% end %>
               </div>
+            </details>
+
+            <%!-- Claim type --%>
+            <%= if @node_types != [] do %>
+              <details class="group" open>
+                <summary class="flex items-center justify-between cursor-pointer list-none [&::-webkit-details-marker]:hidden mb-1.5">
+                  <span class="text-xs font-medium text-base-content/50">Claim type</span>
+                  <svg class="w-3 h-3 text-base-content/40 transition-transform group-open:rotate-180" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7" /></svg>
+                </summary>
+                <div class="space-y-1">
+                  <button
+                    phx-click="filter_type"
+                    phx-value-type="all"
+                    class={[
+                      "w-full text-left px-2.5 py-1.5 rounded-lg text-xs transition-colors",
+                      if(@filter_type == "all",
+                        do: "bg-primary/10 text-primary font-medium",
+                        else: "text-base-content/60 hover:bg-base-200 hover:text-base-content"
+                      )
+                    ]}
+                  >
+                    All types
+                  </button>
+                  <%= for type <- @node_types do %>
+                    <button
+                      phx-click="filter_type"
+                      phx-value-type={type}
+                      class={[
+                        "w-full text-left px-2.5 py-1.5 rounded-lg text-xs capitalize transition-colors",
+                        if(@filter_type == type,
+                          do: "bg-primary/10 text-primary font-medium",
+                          else: "text-base-content/60 hover:bg-base-200 hover:text-base-content"
+                        )
+                      ]}
+                    >
+                      {type}
+                    </button>
+                  <% end %>
+                </div>
+              </details>
             <% end %>
           </div>
 
           <%!-- Legend --%>
           <div class="px-4 py-4 mt-auto border-t border-base-200">
-            <p class="text-xs font-medium text-base-content/50 mb-2">Legend</p>
-            <div class="space-y-1.5">
-              <%= for layer <- ["self_description", "internal_record", "external_context"] do %>
-                <div class="flex items-center gap-2">
-                  <div class={["w-2.5 h-2.5 rounded-full shrink-0", layer_dot_class(layer)]}></div>
-                  <span class="text-xs text-base-content/60">{corpus_layer_label(layer)}</span>
-                </div>
-              <% end %>
-              <div class="pt-1.5 border-t border-base-200 mt-1.5 space-y-1.5">
-                <div class="flex items-center gap-2">
-                  <div class="w-5 border-t-2 border-base-content/60 shrink-0"></div>
-                  <span class="text-xs text-base-content/60">Solid</span>
-                </div>
-                <div class="flex items-center gap-2">
-                  <div class="w-5 border-t-2 border-dashed border-base-content/40 shrink-0"></div>
-                  <span class="text-xs text-base-content/60">Dashed</span>
-                </div>
-                <div class="flex items-center gap-2">
-                  <div class="w-5 border-t-2 border-dotted border-base-content/25 shrink-0"></div>
-                  <span class="text-xs text-base-content/60">Dotted</span>
+            <details class="group">
+              <summary class="flex items-center justify-between cursor-pointer list-none [&::-webkit-details-marker]:hidden mb-2">
+                <span class="text-xs font-medium text-base-content/50">Legend</span>
+                <svg class="w-3 h-3 text-base-content/40 transition-transform group-open:rotate-180" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7" /></svg>
+              </summary>
+              <div class="space-y-1.5">
+                <%= for layer <- ["self_description", "internal_record", "external_context"] do %>
+                  <div class="flex items-center gap-2">
+                    <div class={["w-2.5 h-2.5 rounded-full shrink-0", layer_dot_class(layer)]}></div>
+                    <span class="text-xs text-base-content/60">{corpus_layer_label(layer)}</span>
+                  </div>
+                <% end %>
+                <div class="pt-1.5 border-t border-base-200 mt-1.5 space-y-1.5">
+                  <div class="flex items-center gap-2">
+                    <div class="w-5 border-t-2 border-base-content/60 shrink-0"></div>
+                    <span class="text-xs text-base-content/60">Solid</span>
+                  </div>
+                  <div class="flex items-center gap-2">
+                    <div class="w-5 border-t-2 border-dashed border-base-content/40 shrink-0"></div>
+                    <span class="text-xs text-base-content/60">Dashed</span>
+                  </div>
+                  <div class="flex items-center gap-2">
+                    <div class="w-5 border-t-2 border-dotted border-base-content/25 shrink-0"></div>
+                    <span class="text-xs text-base-content/60">Dotted</span>
+                  </div>
                 </div>
               </div>
-            </div>
+            </details>
           </div>
         </div>
 
@@ -962,7 +978,7 @@ defmodule XwaWeb.GraphLive do
           <%!-- Canvas: always in DOM so LiveView patches rather than replaces it --%>
           <div
             id="cy"
-            phx-hook="CytoscapeGraph"
+            phx-hook="SigmaGraph"
             phx-update="ignore"
             data-graph={Jason.encode!(@graph_data)}
             data-neighborhood={Jason.encode!(@neighborhood)}
@@ -982,7 +998,7 @@ defmodule XwaWeb.GraphLive do
             </div>
           <% end %>
           <div class="absolute bottom-3 right-3 flex gap-1.5">
-            <div class="rounded-lg bg-base-100/90 border border-base-200 px-2.5 py-1 text-xs text-base-content/50 backdrop-blur-sm">
+            <div id="cy-graph-stats" class="rounded-lg bg-base-100/90 border border-base-200 px-2.5 py-1 text-xs text-base-content/50 backdrop-blur-sm">
               {@graph_data.nodes |> length()} nodes · {@graph_data.edges |> length()} edges
             </div>
           </div>

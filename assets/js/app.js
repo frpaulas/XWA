@@ -25,36 +25,70 @@ import {LiveSocket} from "phoenix_live_view"
 import {hooks as colocatedHooks} from "phoenix-colocated/xwa"
 import {CodeEditorHook} from "../../deps/live_monaco_editor/priv/static/live_monaco_editor.esm"
 import topbar from "../vendor/topbar"
-import cytoscape from "cytoscape"
-import fcose from "cytoscape-fcose"
+import Graph from "graphology"
+import Sigma from "sigma"
+import forceAtlas2 from "graphology-layout-forceatlas2"
+import { createNodePiechartProgram } from "@sigma/node-piechart"
 
-cytoscape.use(fcose)
+// Synthesis node renderer: two equal slices, one per constituent graph.
+// Colors chosen to contrast with the green regular-node palette.
+const NodePiechartProgram = createNodePiechartProgram({
+  defaultColor: "#9ca3af",
+  slices: [
+    { color: { value: "#3b82f6" }, value: { attribute: "slice_a" } },
+    { color: { value: "#f59e0b" }, value: { attribute: "slice_b" } },
+  ],
+})
+
+// Isolated node renderer: two-tone red piechart so visually-disconnected nodes
+// are distinct from both regular nodes (green circles) and synthesis nodes (blue/amber).
+// slice_a=1, slice_b=0 → full dark-red disc with piechart border.
+const IsolatedNodeProgram = createNodePiechartProgram({
+  defaultColor: "#fca5a5",
+  slices: [
+    { color: { value: "#dc2626" }, value: { attribute: "slice_a" } },
+    { color: { value: "#fca5a5" }, value: { attribute: "slice_b" } },
+  ],
+})
 
 // ---------------------------------------------------------------------------
-// Cytoscape graph hook
+// Sigma graph hook
 // ---------------------------------------------------------------------------
-const CytoscapeGraph = {
+const SigmaGraph = {
   mounted() {
     this._layoutDone = false
     this._pendingNeighborhood = null
     this._pendingFocus = null
     this._exploredNodes = []  // ordered array of center IDs, oldest first
     this._minDegree = 1
-    this._inOverlay = false       // true while showing neighborhood or focus overlay
-    this._applyingOverlay = false // re-entrancy guard
-    // Mount Cytoscape on a stable child div, not this.el directly.
-    // LiveView patches this.el's attributes on updates but never touches its children,
-    // so the canvas elements survive across LiveView re-renders.
-    this._cyContainer = document.createElement("div")
-    this._cyContainer.style.cssText = "position:absolute;top:0;right:0;bottom:0;left:0;overflow:hidden;"
-    this.el.appendChild(this._cyContainer)
+    this._inOverlay = false
+    this._applyingOverlay = false
+    // Visual state — read by nodeReducer/edgeReducer on every frame.
+    // Mutate these objects and call sigma.refresh() to update the display.
+    this._hiddenNodes = new Set()      // degree-filtered nodes
+    this._hiddenEdges = new Set()      // degree-filtered edges
+    this._overlayHidden = new Set()    // nodes hidden during neighborhood/focus overlay
+    this._overlayHiddenEdges = new Set()
+    this._dimmedNodes = new Set()      // focus-dimmed nodes
+    this._dimmedEdges = new Set()      // focus-dimmed edges
+    this._highlightedNode = null       // hover target
+    this._hoveredNeighbors = new Set() // neighbors of hover target
+    this._hoveredEdges = new Set()     // edges of hover target
+    this._selectedNode = null
+    this._trailNodes = new Set()       // previous exploration centers (purple)
+    this._maxDegree = 1
+    this._draggedNode = null           // node currently being dragged
+    this._isDragging = false           // true once drag threshold exceeded
+    this._didDrag = false              // latches true after threshold; consumed by clickNode
+    this._dragStartPos = null          // {x, y} viewport coords at mousedown
 
-    // Listen for graph data pushed from the server after async load or filter change
+    // Mount Sigma on a stable child div so LiveView re-renders don't destroy the canvas.
+    this._container = document.createElement("div")
+    this._container.style.cssText = "position:absolute;top:0;right:0;bottom:0;left:0;overflow:hidden;"
+    this.el.appendChild(this._container)
+
     this.handleEvent("graph_loaded", (data) => {
-      if (this.cy) {
-        this.cy.destroy()
-        this.cy = null
-      }
+      this._destroySigma()
       this._layoutDone = false
       this._pendingNeighborhood = null
       this._pendingFocus = null
@@ -63,7 +97,7 @@ const CytoscapeGraph = {
       this._inOverlay = false
       this._applyingOverlay = false
       if (data.full_reload) this._showOverlay()
-      this.initCy(data)
+      this._initSigma(data)
     })
 
     this.handleEvent("neighborhood_changed", (neighborhood) => {
@@ -76,29 +110,44 @@ const CytoscapeGraph = {
       const hasFocus = neighborhoods && neighborhoods.length > 0
       this._pendingFocus = hasFocus ? neighborhoods : null
       if (hasFocus) {
-        // Focus mode is mutually exclusive with neighborhood
         this._pendingNeighborhood = null
         if (this._layoutDone) this._applyPendingOverlay()
       }
-      // If focus is empty, leave neighborhood state untouched — neighborhood_changed owns that
     })
 
-    // Initial render: start with whatever data-graph holds (may be empty on async load)
     const initialData = JSON.parse(this.el.dataset.graph)
     if (initialData.nodes && initialData.nodes.length > 0) {
-      this.initCy(initialData)
+      this._initSigma(initialData)
     }
-    // Otherwise wait for "graph_loaded" event
   },
 
-  updated() {
-    // Neighborhood, focus, and graph data are all delivered via push_event / handleEvent.
-    // Nothing to do on DOM attribute updates.
-  },
+  updated() {},
 
   destroyed() {
     if (this._resizeObserver) this._resizeObserver.disconnect()
-    if (this.cy) this.cy.destroy()
+    if (this._onDocMouseUp) document.removeEventListener("mouseup", this._onDocMouseUp)
+    this._destroySigma()
+  },
+
+  _destroySigma() {
+    if (this.sigma) { this.sigma.kill(); this.sigma = null }
+    if (this.graph)  { this.graph.clear(); this.graph = null }
+    this._hiddenNodes = new Set()
+    this._hiddenEdges = new Set()
+    this._overlayHidden = new Set()
+    this._overlayHiddenEdges = new Set()
+    this._dimmedNodes = new Set()
+    this._dimmedEdges = new Set()
+    this._highlightedNode = null
+    this._hoveredNeighbors = new Set()
+    this._hoveredEdges = new Set()
+    this._selectedNode = null
+    this._trailNodes = new Set()
+    this._maxDegree = 1
+    this._draggedNode = null
+    this._isDragging = false
+    this._didDrag = false
+    this._dragStartPos = null
   },
 
   _showOverlay() {
@@ -112,42 +161,42 @@ const CytoscapeGraph = {
   },
 
   _applyPendingOverlay() {
-    if (!this.cy) return
+    if (!this.sigma) return
     if (this._applyingOverlay) return
     this._applyingOverlay = true
     try {
       if (this._pendingFocus) {
         this._inOverlay = true
-        this.cy.elements().unselect()
+        this._selectedNode = null
         this._applyFocusMode(this._pendingFocus)
       } else if (this._pendingNeighborhood) {
         const n = this._pendingNeighborhood
         const hoodSet = new Set(n.ids || [])
         hoodSet.add(n.center_id)
-        this.cy.elements().unselect()
+        this._selectedNode = n.center_id
         const existingIdx = this._exploredNodes.indexOf(n.center_id)
         if (existingIdx !== -1) {
-          // Keep this node as the current (last) entry; drop everything after it
           this._exploredNodes = this._exploredNodes.slice(0, existingIdx + 1)
         } else {
           this._exploredNodes.push(n.center_id)
         }
-        this._pendingNeighborhood = null  // clear before _applyNeighborhood to prevent re-entrant layoutstop re-apply
+        this._pendingNeighborhood = null
         this._inOverlay = true
         this._applyNeighborhood(hoodSet, n.center_id)
-        const centerNode = this.cy.getElementById(n.center_id)
-        if (centerNode.length) centerNode.select()
       } else if (this._inOverlay) {
-        // Only restore full graph if we were actually showing an overlay.
-        // This prevents a spurious "restore" when _applyPendingOverlay is called
-        // with nothing pending after the initial layout completes.
         this._inOverlay = false
         this._exploredNodes = []
+        this._selectedNode = null
+        this._trailNodes = new Set()
+        this._overlayHidden = new Set()
+        this._overlayHiddenEdges = new Set()
+        this._dimmedNodes = new Set()
+        this._dimmedEdges = new Set()
         this._renderExploredLabels()
-        this.cy.elements().unselect()
-        this.cy.elements().removeStyle("opacity display background-color border-color border-width")
         this._applyDegreeFilter()
-        this.cy.fit(80)
+        this.sigma.refresh()
+        this._updateStats()
+        this._fitView()
       }
     } finally {
       this._applyingOverlay = false
@@ -155,83 +204,175 @@ const CytoscapeGraph = {
   },
 
   _applyNeighborhood(hoodSet, centerId) {
-    this.cy.nodes().forEach(n => {
-      n.style({display: hoodSet.has(n.id()) ? "element" : "none"})
-    })
-    this.cy.edges().forEach(e => {
-      const inHood = hoodSet.has(e.source().id()) && hoodSet.has(e.target().id())
-      e.style({display: inHood ? "element" : "none"})
-    })
-    const hoodEles = this.cy.elements().filter(ele => {
-      if (ele.isNode()) return hoodSet.has(ele.id())
-      return hoodSet.has(ele.source().id()) && hoodSet.has(ele.target().id())
-    })
-    if (!hoodEles.length) return
+    // Everything outside the hood is hidden; trail nodes are always shown.
+    this._overlayHidden = new Set()
+    this._overlayHiddenEdges = new Set()
+    this._dimmedNodes = new Set()
+    this._dimmedEdges = new Set()
+    this._trailNodes = new Set()
 
-    // Concentric layout — center node has highest local degree so lands at center.
-    const hoodNodeIds = new Set(hoodEles.nodes().map(n => n.id()))
-    hoodEles.layout({
-      name: "concentric",
-      animate: false,
-      fit: true,
-      padding: 60,
-      startAngle: 3 / 2 * Math.PI,
-      clockwise: true,
-      equidistant: false,
-      minNodeSpacing: 20,
-      concentric: (node) => node.connectedEdges().filter(e =>
-        hoodNodeIds.has(e.source().id()) && hoodNodeIds.has(e.target().id())
-      ).length,
-      levelWidth: () => 2,
-    }).run()
+    this.graph.forEachNode((id) => {
+      if (!hoodSet.has(id) && !this._exploredNodes.includes(id)) {
+        this._overlayHidden.add(id)
+      }
+    })
+    this.graph.forEachEdge((id, _attrs, source, target) => {
+      const sourceVisible = hoodSet.has(source) || this._exploredNodes.includes(source)
+      const targetVisible = hoodSet.has(target) || this._exploredNodes.includes(target)
+      if (!sourceVisible || !targetVisible) {
+        this._overlayHiddenEdges.add(id)
+      }
+    })
 
-    this.cy.fit(hoodEles, 60)
-
-    // Mark previous centers purple and force them visible even if not in hoodSet.
-    // They need to be shown so the user can see and tap the back-path.
+    // Mark trail nodes (previous centers) — purple in the reducer
     this._exploredNodes.forEach(id => {
-      if (id === centerId) return
-      const node = this.cy.getElementById(id)
-      if (!node.length) return
-      node.style({
-        "display": "element",
-        "background-color": "#8b5cf6",
-        "border-color": "#8b5cf6",
-        "border-width": 3,
-        "opacity": 1,
-      })
-      // Also show edges connecting this back-node to the current hood
-      node.connectedEdges().forEach(e => {
-        const otherId = e.source().id() === id ? e.target().id() : e.source().id()
-        if (hoodSet.has(otherId)) e.style({display: "element"})
-      })
+      if (id !== centerId) this._trailNodes.add(id)
     })
+
+    // Lay out the neighborhood concentrically around the center node
+    this._concentricLayout(hoodSet, centerId)
 
     this._renderExploredLabels()
+    this.sigma.refresh()
+    this._updateStats()
+    setTimeout(() => this._fitToNodes(hoodSet), 50)
+  },
+
+  _applyFocusMode(neighborhoods) {
+    const centerIds = new Set(neighborhoods.map(h => h.center_id))
+    const allHoodIds = new Set()
+    neighborhoods.forEach(h => {
+      allHoodIds.add(h.center_id)
+      h.ids.forEach(id => allHoodIds.add(id))
+    })
+
+    this._overlayHidden = new Set()
+    this._overlayHiddenEdges = new Set()
+    this._dimmedNodes = new Set()
+    this._dimmedEdges = new Set()
+    this._trailNodes = centerIds
+
+    this.graph.forEachNode((id) => {
+      if (!allHoodIds.has(id)) this._dimmedNodes.add(id)
+    })
+    this.graph.forEachEdge((id, _attrs, source, target) => {
+      if (!allHoodIds.has(source) || !allHoodIds.has(target)) this._dimmedEdges.add(id)
+    })
+
+    this.sigma.refresh()
+    this._updateStats()
+    setTimeout(() => this._fitToNodes(allHoodIds), 50)
   },
 
   _applyDegreeFilter() {
-    if (!this.cy || this._minDegree <= 1) return
-    const min = this._minDegree
-    this.cy.nodes().forEach(n => {
-      const deg = n.degree()
-      n.style({display: deg >= min ? "element" : "none"})
+    this._hiddenNodes = new Set()
+    this._hiddenEdges = new Set()
+    if (this._minDegree > 1) {
+      const min = this._minDegree
+      this.graph.forEachNode((id) => {
+        if (this.graph.degree(id) < min) this._hiddenNodes.add(id)
+      })
+      this.graph.forEachEdge((id, _attrs, source, target) => {
+        if (this._hiddenNodes.has(source) || this._hiddenNodes.has(target)) {
+          this._hiddenEdges.add(id)
+        }
+      })
+    }
+    // Color nodes and set type based on visible connectivity.
+    // Visually-isolated nodes (no visible edges) get the "isolated" piechart renderer;
+    // synthesis nodes restore their "piechart" type; regular nodes are left as default.
+    this.graph.forEachNode((id) => {
+      if (this._hiddenNodes.has(id)) return
+      const hasVisibleEdge = this.graph.someEdge(id, (eid) => !this._hiddenEdges.has(eid))
+      const isSynthesis = this.graph.getNodeAttribute(id, "node_type") === "synthesis"
+      if (hasVisibleEdge) {
+        this.graph.setNodeAttribute(id, "_color", sigmaNodeColor(this.graph.degree(id), this._maxDegree))
+        this.graph.setNodeAttribute(id, "type", isSynthesis ? "piechart" : undefined)
+        this.graph.setNodeAttribute(id, "slice_a", isSynthesis ? 1 : 0)
+        this.graph.setNodeAttribute(id, "slice_b", isSynthesis ? 1 : 0)
+      } else {
+        this.graph.setNodeAttribute(id, "_color", "#f87171")
+        this.graph.setNodeAttribute(id, "type", "isolated")
+        this.graph.setNodeAttribute(id, "slice_a", 1)
+        this.graph.setNodeAttribute(id, "slice_b", 1)  // equal halves → visible bicolor disc
+      }
     })
-    this.cy.edges().forEach(e => {
-      const show = e.source().style("display") !== "none" && e.target().style("display") !== "none"
-      e.style({display: show ? "element" : "none"})
+  },
+
+  // Place neighborhood nodes in concentric rings around centerId.
+  // Center node is ring 0; its direct neighbors are ring 1.
+  _concentricLayout(hoodSet, centerId) {
+    const nodeIds = [...hoodSet].filter(id => this.graph.hasNode(id))
+    if (!nodeIds.length) return
+
+    const cx = this.graph.getNodeAttribute(centerId, "x") || 0
+    const cy = this.graph.getNodeAttribute(centerId, "y") || 0
+
+    // Separate center from ring nodes
+    const ringNodes = nodeIds.filter(id => id !== centerId)
+    const ringRadius = Math.max(150, ringNodes.length * 25)
+    const angleStep = ringNodes.length > 0 ? (2 * Math.PI) / ringNodes.length : 0
+
+    this.graph.setNodeAttribute(centerId, "x", cx)
+    this.graph.setNodeAttribute(centerId, "y", cy)
+
+    ringNodes.forEach((id, i) => {
+      const angle = i * angleStep - Math.PI / 2
+      this.graph.setNodeAttribute(id, "x", cx + ringRadius * Math.cos(angle))
+      this.graph.setNodeAttribute(id, "y", cy + ringRadius * Math.sin(angle))
     })
+  },
+
+  // Fit the Sigma camera to show a subset of nodes.
+  // Sigma normalizes all graph coords to [0,1] internally. The camera default
+  // state {x:0.5, y:0.5, ratio:1} shows the full graph. For subsets we
+  // compute bounds in normalized display space and set camera accordingly.
+  _fitToNodes(nodeIdSet) {
+    if (!this.sigma || !nodeIdSet.size) return
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity
+    nodeIdSet.forEach(id => {
+      if (!this.graph.hasNode(id)) return
+      const display = this.sigma.getNodeDisplayData(id)
+      if (!display) return
+      if (display.x < minX) minX = display.x
+      if (display.x > maxX) maxX = display.x
+      if (display.y < minY) minY = display.y
+      if (display.y > maxY) maxY = display.y
+    })
+    if (!isFinite(minX)) {
+      // No display data yet — fall back to showing full graph
+      this.sigma.getCamera().setState({x: 0.5, y: 0.5, ratio: 1, angle: 0})
+      return
+    }
+    const cx = (minX + maxX) / 2
+    const cy = (minY + maxY) / 2
+    const spanX = maxX - minX || 0.001
+    const spanY = maxY - minY || 0.001
+    // Camera ratio 1 shows a normalized span of 1.0. Scale proportionally,
+    // adding 25% padding (multiply by 1.25).
+    const ratio = Math.max(spanX, spanY) * 1.25
+    this.sigma.getCamera().setState({x: cx, y: cy, ratio, angle: 0})
+  },
+
+  _fitView() {
+    if (!this.sigma || !this.graph) return
+    const visibleIds = []
+    this.graph.forEachNode((id) => {
+      if (!this._hiddenNodes.has(id) && !this._overlayHidden.has(id)) visibleIds.push(id)
+    })
+    if (visibleIds.length === 0) {
+      this.sigma.getCamera().setState({x: 0.5, y: 0.5, ratio: 1, angle: 0})
+      return
+    }
+    this._fitToNodes(new Set(visibleIds))
   },
 
   _renderExploredLabels() {
     const container = document.getElementById("cy-explored-labels")
     if (!container) return
     container.innerHTML = ""
-    // All entries except the last are previous centers — render as back buttons.
-    // The last entry is the current center — render as a plain (non-clickable) label.
     this._exploredNodes.forEach((id, idx) => {
-      const node = this.cy && this.cy.getElementById(id)
-      const label = (node && node.length) ? (node.data("label") || id) : id
+      const label = this.graph ? (this.graph.getNodeAttribute(id, "label") || id) : id
       const isCurrent = idx === this._exploredNodes.length - 1
       const el = document.createElement("button")
       el.title = isCurrent ? "Current node" : `Back to: ${label}`
@@ -259,264 +400,406 @@ const CytoscapeGraph = {
     })
   },
 
-  _applyFocusMode(neighborhoods) {
-    const centerIds = new Set(neighborhoods.map(h => h.center_id))
-    const allHoodIds = new Set()
-    neighborhoods.forEach(h => {
-      allHoodIds.add(h.center_id)
-      h.ids.forEach(id => allHoodIds.add(id))
+  _initSigma(data) {
+    const colors = resolveColors()
+    this.graph = new Graph({multi: true, type: "directed"})
+
+    // Add nodes
+    data.nodes.forEach(({data: d}) => {
+      const isSynthesis = d.node_type === "synthesis"
+      this.graph.addNode(d.id, {
+        label: d.label || d.id,
+        // Store semantic type separately — Sigma uses `type` to pick the renderer,
+        // so we only set it for nodes that need a custom program.
+        semanticType: d.type,
+        node_type: d.node_type || "claim",
+        type: isSynthesis ? "piechart" : undefined,
+        slice_a: isSynthesis ? 1 : 0,
+        slice_b: isSynthesis ? 1 : 0,
+        corpus_layer: d.corpus_layer,
+        confidence: d.confidence ?? 1.0,
+        human_validated: d.human_validated ?? false,
+        contested: d.contested ?? false,
+        x: Math.random() * 1000,
+        y: Math.random() * 1000,
+        size: 8,
+        color: "#6b7280",
+      })
     })
 
-    // Dim everything outside focus neighborhoods
-    this.cy.nodes().forEach(n => {
-      n.style({opacity: allHoodIds.has(n.id()) ? 1 : 0.08})
-    })
-    this.cy.edges().forEach(e => {
-      const inHood = allHoodIds.has(e.source().id()) && allHoodIds.has(e.target().id())
-      e.style({opacity: inHood ? 1 : 0.05})
-    })
-
-    // Highlight center nodes in violet to distinguish them
-    centerIds.forEach(id => {
-      const n = this.cy.getElementById(id)
-      if (n.length) {
-        n.style({"background-color": "#8b5cf6", "border-color": "#8b5cf6", "border-width": 3})
+    // Add edges
+    data.edges.forEach(({data: d}) => {
+      if (this.graph.hasNode(d.source) && this.graph.hasNode(d.target)) {
+        this.graph.addEdgeWithKey(d.id, d.source, d.target, {
+          type: d.type || "relates",
+          certainty: d.certainty || "dashed",
+          confidence: d.confidence ?? 0.5,
+          cross_graph: d.cross_graph ?? false,
+        })
       }
     })
 
-    // Fit view to the focus area
-    const hoodEles = this.cy.elements().filter(ele => {
-      if (ele.isNode()) return allHoodIds.has(ele.id())
-      return allHoodIds.has(ele.source().id()) && allHoodIds.has(ele.target().id())
+    // Compute degree-based node attributes once (used by reducers)
+    this._maxDegree = 1
+    this.graph.forEachNode((id) => {
+      const deg = this.graph.degree(id)
+      if (deg > this._maxDegree) this._maxDegree = deg
     })
-    if (hoodEles.length) this.cy.fit(hoodEles, 120)
-  },
-
-  initCy(data) {
-    const colors = resolveColors()
-    this.cy = cytoscape({
-      container: this._cyContainer,
-      elements: [...data.nodes, ...data.edges],
-      style: cytoscapeStyle(colors),
-      layout: {name: "preset"},
-      minZoom: 0.05,
-      maxZoom: 3,
+    this.graph.forEachNode((id) => {
+      const deg = this.graph.degree(id)
+      const isSynthesis = this.graph.getNodeAttribute(id, "node_type") === "synthesis"
+      // Synthesis nodes are larger so the pie slices are clearly legible
+      this.graph.setNodeAttribute(id, "_size", isSynthesis ? sigmaNodeSize(deg) + 8 : sigmaNodeSize(deg))
+      this.graph.setNodeAttribute(id, "_color", sigmaNodeColor(deg, this._maxDegree))
     })
 
-    // Delay layout until after the browser has painted and the container has
-    // its real dimensions (the canvas can start at height 0 during LiveView mount).
-    const nodeCount = this.cy.nodes().length
+    const nodeCount = this.graph.order
     const msg = document.getElementById("cy-loading-msg")
     if (msg && nodeCount > 0) msg.textContent = `Laying out ${nodeCount} nodes…`
-    setTimeout(() => {
-      this.cy.resize()
-      const layout = this.cy.layout(layoutConfig(nodeCount))
-      layout.run()
-      // Hide overlay when layout finishes, with a hard timeout fallback in case
-      // layoutstop never fires (can happen with very large graphs).
-      const fallback = setTimeout(() => {
-        this._layoutDone = true
-        this._applyDegreeFilter()
-        this._hideOverlay()
-        this._applyPendingOverlay()
-      }, 8000)
-      this.cy.one("layoutstop", () => {
-        clearTimeout(fallback)
-        this._layoutDone = true
-        this._applyDegreeFilter()
-        this._hideOverlay()
-        this._applyPendingOverlay()
-      })
-    }, 50)
 
-    this._resizeObserver = new ResizeObserver(() => this.cy.resize())
-    this._resizeObserver.observe(this.el)
+    this.sigma = new Sigma(this.graph, this._container, {
+      minCameraRatio: 0.02,
+      maxCameraRatio: 20,
+      renderEdgeLabels: false,
+      defaultEdgeType: "arrow",
+      zIndex: true,   // respect zIndex returned by reducers
+      nodeProgramClasses: { piechart: NodePiechartProgram, isolated: IsolatedNodeProgram },
+      nodeReducer: (id, attrs) => this._nodeReducer(id, attrs, colors),
+      edgeReducer: (id, attrs) => this._edgeReducer(id, attrs, colors),
+    })
 
-    this.cy.on("tap", "node", (evt) => {
-      const id = evt.target.id()
+    // Events
+    this.sigma.on("clickNode", ({node}) => {
+      if (this._didDrag) { this._didDrag = false; return }  // consumed: drag just ended
       const currentCenter = this._exploredNodes[this._exploredNodes.length - 1]
-      // If this is a previous center (not the current one), unwind back to it
-      const prevIdx = this._exploredNodes.indexOf(id)
-      if (prevIdx !== -1 && id !== currentCenter) {
-        this.pushEvent("unwind_to", {id})
+      const prevIdx = this._exploredNodes.indexOf(node)
+      if (prevIdx !== -1 && node !== currentCenter) {
+        this.pushEvent("unwind_to", {id: node})
       } else {
-        this.pushEvent("node_selected", {id})
+        this.pushEvent("node_selected", {id: node})
       }
     })
 
-    this.cy.on("tap", (evt) => {
-      if (evt.target === this.cy) {
-        this.pushEvent("deselect", {})
-      }
+    this.sigma.on("clickStage", () => {
+      this.pushEvent("deselect", {})
     })
 
-    this.cy.on("mouseover", "node", (evt) => {
-      const n = evt.target
-      const label = n.data("label") || n.id()
+    this.sigma.on("enterNode", ({node}) => {
+      this._highlightedNode = node
+      this._hoveredNeighbors = new Set(this.graph.neighbors(node))
+      this._hoveredEdges = new Set()
+      this.graph.forEachEdge(node, (id) => this._hoveredEdges.add(id))
+      const label = this.graph.getNodeAttribute(node, "label") || node
       const text = document.getElementById("cy-hover-text")
-      if (text) {
-        text.textContent = label
-        text.style.display = "block"
-      }
-      n.connectedEdges().forEach(e => {
-        const col = edgeTypeColor(e.data("type"))
-        e.style({"line-color": col, "target-arrow-color": col, "width": 4, "opacity": 1})
-      })
-      n.neighborhood("node").forEach(nb => {
-        if (nb.id() !== n.id()) nb.style({"border-width": 2, "border-color": "#f59e0b"})
-      })
+      if (text) { text.textContent = label; text.style.display = "block" }
+      this.sigma.refresh()
     })
 
-    this.cy.on("mouseout", "node", (evt) => {
-      const n = evt.target
+    this.sigma.on("leaveNode", () => {
+      this._highlightedNode = null
+      this._hoveredNeighbors = new Set()
+      this._hoveredEdges = new Set()
       const text = document.getElementById("cy-hover-text")
       if (text) text.style.display = "none"
-      n.connectedEdges().removeStyle("line-color target-arrow-color width opacity")
-      n.neighborhood("node").removeStyle("border-width border-color")
+      this.sigma.refresh()
+    })
+
+    // Node drag — record mousedown on node, begin dragging once pointer moves
+    // > 5px so normal clicks are not swallowed.
+    // Sigma's event coords are at e.x / e.y (viewport pixels), NOT e.event.x.
+    this.sigma.on("downNode", (e) => {
+      this._draggedNode = e.node
+      this._isDragging = false
+      this._didDrag = false
+      this._dragStartPos = {x: e.x, y: e.y}
+      e.preventSigmaDefault()  // stop Sigma starting a camera pan on this mousedown
+    })
+
+    // Use getMouseCaptor() so preventSigmaDefault() actually blocks camera panning.
+    this.sigma.getMouseCaptor().on("mousemovebody", (e) => {
+      if (!this._draggedNode) return
+      // Block sigma camera AND browser default while a node drag is in progress.
+      e.preventSigmaDefault()
+      e.original.preventDefault()
+      e.original.stopPropagation()
+      if (!this._isDragging) {
+        const dx = e.x - this._dragStartPos.x
+        const dy = e.y - this._dragStartPos.y
+        if (Math.sqrt(dx * dx + dy * dy) < 5) return
+        this._isDragging = true
+        this._didDrag = true  // latch: survives mouseup cleanup, consumed by clickNode
+      }
+      const pos = this.sigma.viewportToGraph({x: e.x, y: e.y})
+      this.graph.setNodeAttribute(this._draggedNode, "x", pos.x)
+      this.graph.setNodeAttribute(this._draggedNode, "y", pos.y)
+      this.sigma.refresh()
+    })
+
+    // Use document mouseup so drag cleans up even if mouse is released outside the container.
+    this._onDocMouseUp = () => {
+      this._draggedNode = null
+      this._isDragging = false
+      this._dragStartPos = null
+    }
+    document.addEventListener("mouseup", this._onDocMouseUp)
+
+    this._resizeObserver = new ResizeObserver(() => this.sigma && this.sigma.refresh())
+    this._resizeObserver.observe(this.el)
+
+    // Run layout after the browser has painted
+    setTimeout(() => {
+      this._runLayout(nodeCount)
+    }, 50)
+  },
+
+  _runLayout(nodeCount) {
+    if (nodeCount === 0) {
+      this._onLayoutDone()
+      return
+    }
+    // ForceAtlas2 for all sizes — scale iterations down for large graphs.
+    const iterations = nodeCount > 500 ? 30 : nodeCount > 150 ? 80 : 300
+    forceAtlas2.assign(this.graph, {
+      iterations,
+      settings: forceAtlas2.inferSettings(this.graph),
+    })
+    this._onLayoutDone()
+  },
+
+  // Place visually-isolated nodes (type:"isolated", set by _applyDegreeFilter) on a
+  // ring around the connected component.  Catches both graphology degree-0 nodes and
+  // nodes whose edges are all hidden by the current degree filter.
+  _placeIsolatedNodes() {
+    const isolated = []
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity
+
+    this.graph.forEachNode((id) => {
+      if (this._hiddenNodes.has(id)) return
+      if (this.graph.getNodeAttribute(id, "type") === "isolated") {
+        isolated.push(id)
+      } else {
+        const x = this.graph.getNodeAttribute(id, "x")
+        const y = this.graph.getNodeAttribute(id, "y")
+        if (x < minX) minX = x
+        if (x > maxX) maxX = x
+        if (y < minY) minY = y
+        if (y > maxY) maxY = y
+      }
+    })
+
+    if (isolated.length === 0) return
+    if (!isFinite(minX)) { minX = 0; maxX = 0; minY = 0; maxY = 0 }
+
+    const cx = (minX + maxX) / 2
+    const cy = (minY + maxY) / 2
+    // Ring radius: just outside the bounding circle of the connected component.
+    const halfDiag = Math.hypot(maxX - minX, maxY - minY) / 2
+    const radius = Math.max(halfDiag * 1.7, 200)
+    const angleStep = (2 * Math.PI) / isolated.length
+
+    isolated.forEach((id, i) => {
+      const angle = i * angleStep - Math.PI / 2   // start from top
+      this.graph.setNodeAttribute(id, "x", cx + radius * Math.cos(angle))
+      this.graph.setNodeAttribute(id, "y", cy + radius * Math.sin(angle))
     })
   },
-}
 
-function layoutConfig(nodeCount) {
-  // Force-directed layouts (fcose, cose) are O(n²) and unusable beyond ~150 nodes.
-  // For large graphs use concentric layout: places high-degree nodes at centre,
-  // low-degree at the periphery. O(n log n), finishes in milliseconds.
-  if (nodeCount > 150) {
-    return {
-      name: "concentric",
-      animate: false,
-      fit: true,
-      padding: 60,
-      startAngle: 3 / 2 * Math.PI,
-      clockwise: true,
-      equidistant: false,
-      minNodeSpacing: 10,
-      concentric: (node) => node.degree(),
-      levelWidth: () => 3,
+  // BFS over visible nodes to find multi-node connected components, then
+  // translate each smaller component to the right of the largest so they
+  // don't visually merge as the degree filter is loosened.
+  // Single-node isolated components are already handled by _placeIsolatedNodes.
+  _separateComponents() {
+    const visible = new Set()
+    this.graph.forEachNode(id => {
+      if (!this._hiddenNodes.has(id)) visible.add(id)
+    })
+    if (visible.size < 2) return
+
+    // BFS — only traverse edges whose both endpoints are visible
+    const visited = new Set()
+    const components = []
+
+    visible.forEach(startId => {
+      if (visited.has(startId)) return
+      const comp = []
+      const queue = [startId]
+      visited.add(startId)
+      while (queue.length > 0) {
+        const id = queue.shift()
+        comp.push(id)
+        this.graph.forEachNeighbor(id, nbr => {
+          if (visible.has(nbr) && !visited.has(nbr)) {
+            visited.add(nbr); queue.push(nbr)
+          }
+        })
+      }
+      if (comp.length > 1) components.push(comp)  // skip degree-0 singletons
+    })
+
+    if (components.length <= 1) return  // only one real component
+
+    // Bounding box per component
+    const boxes = components.map(nodeIds => {
+      let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity
+      nodeIds.forEach(id => {
+        const x = this.graph.getNodeAttribute(id, "x")
+        const y = this.graph.getNodeAttribute(id, "y")
+        minX = Math.min(minX, x); maxX = Math.max(maxX, x)
+        minY = Math.min(minY, y); maxY = Math.max(maxY, y)
+      })
+      return { nodeIds, minX, maxX, minY, maxY, w: maxX - minX, h: maxY - minY }
+    })
+
+    // Largest component stays put; others line up to its right, vertically centered
+    boxes.sort((a, b) => b.nodeIds.length - a.nodeIds.length)
+    const main = boxes[0]
+    const gap = Math.max(200, main.w * 0.3)
+    let cursor = main.maxX + gap
+
+    for (let i = 1; i < boxes.length; i++) {
+      const box = boxes[i]
+      const dx = cursor - box.minX
+      const dy = (main.minY + main.h / 2) - (box.minY + box.h / 2)
+      box.nodeIds.forEach(id => {
+        this.graph.setNodeAttribute(id, "x", this.graph.getNodeAttribute(id, "x") + dx)
+        this.graph.setNodeAttribute(id, "y", this.graph.getNodeAttribute(id, "y") + dy)
+      })
+      cursor += box.w + gap
     }
-  }
-  return {
-    name: "fcose",
-    animate: false,
-    fit: true,
-    padding: 120,
-    nodeSeparation: 80,
-    idealEdgeLength: 120,
-    edgeElasticity: 0.45,
-    randomize: true,
-    quality: "default",
-    numIter: nodeCount > 80 ? 1200 : 2500,
-    tile: true,
-    tilingPaddingVertical: 20,
-    tilingPaddingHorizontal: 20,
-  }
-}
+  },
 
-// Read actual computed color values from a real DOM element so Cytoscape
-// (which renders to canvas, not CSS) gets concrete hex/rgb values rather
-// than unresolvable CSS variable references.
-function resolveColors() {
-  const el = document.documentElement
-  const cs = getComputedStyle(el)
-  const resolve = (v) => {
-    // daisyUI exposes vars as bare "oklch(...)" or space-separated channels.
-    // Wrap in oklch() if it looks like bare channels (e.g. "89.1% 0.02 90").
-    const raw = cs.getPropertyValue(v).trim()
-    if (!raw) return null
-    // Already a full function value
-    if (raw.startsWith("oklch") || raw.startsWith("hsl") || raw.startsWith("rgb") || raw.startsWith("#")) return raw
-    // Bare channels — wrap
-    return `oklch(${raw})`
-  }
+  _onLayoutDone() {
+    this._layoutDone = true
+    this._applyDegreeFilter()
+    this._placeIsolatedNodes()  // must run after _applyDegreeFilter sets type:"isolated"
+    this._separateComponents()  // must run after _applyDegreeFilter sets _hiddenNodes
+    this._hideOverlay()
+    this.sigma.refresh()
+    this._updateStats()
+    // Defer fit: getNodeDisplayData is only populated after Sigma's first render pass.
+    setTimeout(() => {
+      this._fitView()
+      this._applyPendingOverlay()
+    }, 50)
+  },
 
-  return {
-    base:      resolve("--b1")  || "#ffffff",
-    content:   resolve("--bc")  || "#1f2937",
-    primary:   resolve("--p")   || "#6366f1",
-    secondary: resolve("--s")   || "#8b5cf6",
-    accent:    resolve("--a")   || "#06b6d4",
-    neutral:   resolve("--n")   || "#374151",
-  }
-}
+  // Update the bottom-right stat pill to show "m of n nodes · i of j edges"
+  // when some nodes/edges are hidden, or plain counts when all are visible.
+  _updateStats() {
+    const el = document.getElementById("cy-graph-stats")
+    if (!el || !this.graph) return
+    const totalN = this.graph.order
+    const totalE = this.graph.size
+    const hiddenN = this._hiddenNodes.size + this._overlayHidden.size
+    const hiddenE = this._hiddenEdges.size + this._overlayHiddenEdges.size
+    const shownN = totalN - hiddenN
+    const shownE = totalE - hiddenE
+    el.textContent = (shownN === totalN && shownE === totalE)
+      ? `${totalN} nodes · ${totalE} edges`
+      : `${shownN} of ${totalN} nodes · ${shownE} of ${totalE} edges`
+  },
 
-function cytoscapeStyle(c) {
-  return [
-    {
-      selector: "node",
-      style: {
-        "label": "",
-        "width": (ele) => nodeSize(ele),
-        "height": (ele) => nodeSize(ele),
-        "background-color": (ele) => nodeColor(ele),
-        "border-width": (ele) => ele.data("human_validated") ? 2 : 0,
-        "border-color": "#ffffff",
-      },
-    },
-    {
-      selector: "node:selected",
-      style: {
-        "label": "",
-        "border-width": 4,
-        "border-color": "#f59e0b",
-        "background-color": "#f59e0b",
-        "width": (ele) => nodeSize(ele) + 6,
-        "height": (ele) => nodeSize(ele) + 6,
-      },
-    },
-    {
-      selector: "node[?contested]",
-      style: {
-        "border-width": 2,
-        "border-color": "#f59e0b",
-      },
-    },
-    {
-      selector: "edge",
-      style: {
-        "label": "",
-        "curve-style": "bezier",
-        "target-arrow-shape": "triangle",
-        "arrow-scale": 0.8,
-        "line-style": (ele) => certaintyStyle(ele.data("certainty")),
-        "line-color": c.neutral,
-        "target-arrow-color": c.neutral,
-        "width": (ele) => 0.5 + ele.data("confidence") * 2,
-      },
-    },
-    {
-      selector: "edge[?cross_graph]",
-      style: {
-        "line-color": "#f59e0b",
-        "target-arrow-color": "#f59e0b",
-        "opacity": 0.8,
-      },
-    },
-    {
-      selector: "edge:selected",
-      style: {
-        "label": "data(type)",
-        "font-size": "10px",
-        "color": c.content,
-        "text-background-color": c.base,
-        "text-background-opacity": 0.9,
-        "text-background-padding": "2px",
-        "line-color": c.primary,
-        "target-arrow-color": c.primary,
-      },
-    },
-  ]
-}
+  // nodeReducer: called by Sigma on every render pass for each node.
+  // Returns the display attributes for that node based on current state.
+  _nodeReducer(id, attrs, colors) {
+    const result = {
+      x: attrs.x,
+      y: attrs.y,
+      size: attrs._size || 8,
+      color: attrs._color || colors.neutral,
+      type: attrs.type,       // "piechart" (SN), "isolated", or undefined (regular)
+      slice_a: attrs.slice_a,
+      slice_b: attrs.slice_b,
+      hidden: false,
+      // Degree-based zIndex 0–10; trail=20, selected/hover=30 always on top.
+      zIndex: Math.round((this.graph.degree(id) / Math.max(this._maxDegree, 1)) * 10),
+    }
 
-function certaintyStyle(certainty) {
-  if (certainty === "solid")  return "solid"
-  if (certainty === "dotted") return "dotted"
-  return "dashed"
+    // Degree filter
+    if (this._hiddenNodes.has(id)) { result.hidden = true; return result }
+
+    // Overlay visibility (neighborhood mode)
+    if (this._overlayHidden.has(id)) { result.hidden = true; return result }
+
+    // Focus dimming
+    if (this._dimmedNodes.has(id)) {
+      result.color = colors.neutral
+      result.size = Math.max(result.size * 0.5, 3)
+      return result
+    }
+
+    // Trail nodes (previous exploration centers) — violet
+    if (this._trailNodes.has(id)) {
+      result.color = "#8b5cf6"
+      result.size = result.size + 3
+      result.zIndex = 20
+      return result
+    }
+
+    // Selected node — amber
+    if (id === this._selectedNode) {
+      result.color = "#f59e0b"
+      result.size = result.size + 6
+      result.zIndex = 30
+      return result
+    }
+
+    // Hover: highlight hovered node and its neighbors
+    if (this._highlightedNode) {
+      if (id === this._highlightedNode) {
+        result.size = result.size + 4
+        result.zIndex = 30
+      } else if (this._hoveredNeighbors.has(id)) {
+        result.color = "#f59e0b"
+        result.zIndex = 20
+      }
+    }
+
+    // human_validated gets a lighter border (simulated via slightly larger size)
+    if (attrs.human_validated) result.size = result.size + 1
+
+    return result
+  },
+
+  // edgeReducer: called by Sigma on every render pass for each edge.
+  _edgeReducer(id, attrs, colors) {
+    const result = {
+      color: colors.neutral,
+      size: 0.5 + (attrs.confidence ?? 0.5) * 2,
+      hidden: false,
+      zIndex: 0,
+    }
+
+    if (attrs.cross_graph) result.color = "#f59e0b"
+
+    // Degree filter
+    if (this._hiddenEdges.has(id)) { result.hidden = true; return result }
+
+    // Overlay visibility
+    if (this._overlayHiddenEdges.has(id)) { result.hidden = true; return result }
+
+    // Focus dimming
+    if (this._dimmedEdges.has(id)) {
+      result.color = colors.neutral
+      result.size = 0.5
+      return result
+    }
+
+    // Hover highlight
+    if (this._hoveredEdges.has(id)) {
+      const source = this.graph.source(id)
+      const target = this.graph.target(id)
+      const edgeType = this.graph.getEdgeAttribute(id, "type")
+      result.color = edgeTypeColor(edgeType)
+      result.size = 3
+      result.zIndex = 1
+    }
+
+    return result
+  },
 }
 
 // Assign one of 3 colors to an edge based on its type string.
-// Uses a simple hash so any type always maps to the same color,
-// and new/unknown types are handled gracefully.
-// Colors: sky blue, violet, rose — distinct and readable on both light/dark.
 const EDGE_COLORS = ["#38bdf8", "#a78bfa", "#fb7185"]
 function edgeTypeColor(type) {
   if (!type) return EDGE_COLORS[0]
@@ -525,31 +808,63 @@ function edgeTypeColor(type) {
   return EDGE_COLORS[Math.abs(hash) % EDGE_COLORS.length]
 }
 
-// Scale node size by degree (connection count): hub nodes are visually larger.
-// Isolated nodes (deg=0) are sized the same as a 2-edge node so they don't
-// look like dead pixels. Min ~13px, max ~42px, logarithmic scale.
-function nodeSize(ele) {
-  const deg = Math.max(ele.degree(), 2)
-  const base = 6
-  const scale = 6
-  return base + Math.log1p(deg) * scale
+function sigmaNodeSize(deg) {
+  // Minimum 5 so isolated (0-edge) nodes are visible; scale logarithmically from there.
+  return 5 + Math.log1p(deg) * 2.5
 }
 
-// Color nodes by connectivity:
-//   - No edges → red (isolated, possibly orphaned claims)
-//   - Has edges → green, bright at high degree fading to dim at low degree
-// Uses HSL so the hue stays green (120°) while lightness drops with distance from center.
-function nodeColor(ele) {
-  const deg = ele.degree()
-  if (deg === 0) return "#ef4444"  // red-500
+// Sigma's parseColor only handles hex and rgb() — no hsl(), no oklch().
+// Convert HSL to hex so WebGL receives a format it can parse.
+function hslToHex(h, s, l) {
+  s /= 100; l /= 100
+  const a = s * Math.min(l, 1 - l)
+  const f = n => {
+    const k = (n + h / 30) % 12
+    const c = l - a * Math.max(Math.min(k - 3, 9 - k, 1), -1)
+    return Math.round(255 * c).toString(16).padStart(2, "0")
+  }
+  return `#${f(0)}${f(8)}${f(4)}`
+}
 
-  // Map degree logarithmically to a lightness range: 65% (dim) → 45% (bright)
-  // High-degree nodes get a richer, more saturated green.
-  const maxDeg = Math.max(ele.cy().nodes().maxDegree(), 1)
-  const t = Math.log1p(deg) / Math.log1p(maxDeg)  // 0..1, 1 = most connected
-  const lightness = Math.round(75 - t * 45)        // 75% very pale → 30% deep rich green
-  const saturation = Math.round(40 + t * 55)       // 40% washed out → 95% vivid
-  return `hsl(120, ${saturation}%, ${lightness}%)`
+function sigmaNodeColor(deg, maxDeg) {
+  if (deg === 0) return "#f87171"  // red-400: isolated nodes stand out
+  const t = Math.log1p(deg) / Math.log1p(Math.max(maxDeg, 1))
+  // Tailwind green range: 142° hue. Bright mint → rich forest green.
+  const lightness = Math.round(65 - t * 23)
+  return hslToHex(142, 76, lightness)
+}
+
+// Force any CSS color string (including oklch, hsl) to a hex value by
+// painting a 1×1 canvas — the browser does the conversion for us.
+function cssColorToHex(cssValue) {
+  try {
+    const canvas = document.createElement("canvas")
+    canvas.width = canvas.height = 1
+    const ctx = canvas.getContext("2d")
+    ctx.fillStyle = cssValue
+    ctx.fillRect(0, 0, 1, 1)
+    const [r, g, b] = ctx.getImageData(0, 0, 1, 1).data
+    return `#${r.toString(16).padStart(2,"0")}${g.toString(16).padStart(2,"0")}${b.toString(16).padStart(2,"0")}`
+  } catch { return null }
+}
+
+// Read computed color values from CSS variables (daisyUI theme) and convert
+// them to hex so Sigma's WebGL renderer can parse them.
+// DaisyUI v5 uses raw oklch channel values; we wrap and resolve via canvas.
+function resolveColors() {
+  const cs = getComputedStyle(document.documentElement)
+  const get = (v, fallback) => {
+    const raw = cs.getPropertyValue(v).trim()
+    if (!raw) return fallback
+    const css = raw.startsWith("oklch") || raw.startsWith("hsl") || raw.startsWith("rgb") || raw.startsWith("#")
+      ? raw
+      : `oklch(${raw})`
+    return cssColorToHex(css) || fallback
+  }
+  return {
+    neutral: get("--n",  "#6b7280"),
+    primary: get("--p",  "#6366f1"),
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -616,7 +931,7 @@ const csrfToken = document.querySelector("meta[name='csrf-token']").getAttribute
 const liveSocket = new LiveSocket("/live", Socket, {
   longPollFallbackMs: 2500,
   params: {_csrf_token: csrfToken},
-  hooks: {...colocatedHooks, CytoscapeGraph, CodeEditorHook, MonacoFix, CopyToClipboard, DegreeSlider},
+  hooks: {...colocatedHooks, SigmaGraph, CodeEditorHook, MonacoFix, CopyToClipboard, DegreeSlider},
 })
 
 // Show progress bar on live navigation and form submits

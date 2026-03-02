@@ -305,7 +305,7 @@ defmodule XwaWeb.Layouts do
           <span class="max-w-[120px] truncate">{@current_scope.graph && @current_scope.graph.name || "No graph"}</span>
           <.icon name="hero-chevron-down" class="w-3 h-3 opacity-60" />
         </button>
-        <div class="absolute left-0 top-full mt-1 min-w-[180px] rounded-xl border border-base-200 bg-base-100 shadow-lg opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all duration-150 origin-top-left z-50">
+        <div class="absolute left-0 top-full mt-1 min-w-[220px] rounded-xl border border-base-200 bg-base-100 shadow-lg opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all duration-150 origin-top-left z-50">
           <div class="p-1">
             <p class="px-3 py-1.5 text-[0.65rem] font-semibold uppercase tracking-wider text-base-content/40">Your graphs</p>
             <%= for graph <- @current_scope.graphs do %>
@@ -314,20 +314,32 @@ defmodule XwaWeb.Layouts do
                 <input type="hidden" name="graph_id" value={graph.id} />
                 <button
                   type="submit"
-                  class={"flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm text-left transition-colors " <>
+                  class={"flex w-full items-start gap-2 rounded-lg px-3 py-2 text-left transition-colors " <>
                     if(@current_scope.graph_id == graph.id,
                       do: "bg-primary/10 text-primary font-medium",
                       else: "text-base-content/70 hover:bg-base-200 hover:text-base-content")}
                 >
-                  <%= if @current_scope.graph_id == graph.id do %>
-                    <.icon name="hero-check" class="w-3.5 h-3.5 shrink-0" />
-                  <% else %>
-                    <span class="w-3.5 shrink-0" />
-                  <% end %>
-                  <span class="truncate">{graph.name}</span>
-                  <%= if graph.is_composite do %>
-                    <span class="ml-auto text-[0.6rem] uppercase tracking-wide text-base-content/30">composite</span>
-                  <% end %>
+                  <div class="mt-0.5 shrink-0">
+                    <%= if @current_scope.graph_id == graph.id do %>
+                      <.icon name="hero-check" class="w-3.5 h-3.5" />
+                    <% else %>
+                      <span class="block w-3.5" />
+                    <% end %>
+                  </div>
+                  <div class="min-w-0 flex-1">
+                    <div class="flex items-center gap-1.5">
+                      <span class="truncate text-sm">{graph.name}</span>
+                      <%= if graph.is_composite do %>
+                        <span class="shrink-0 text-[0.6rem] uppercase tracking-wide text-base-content/30">composite</span>
+                      <% end %>
+                    </div>
+                    <%= if graph.description && graph.description != "" do %>
+                      <p class="mt-0.5 text-xs text-base-content/40 truncate">{graph.description}</p>
+                    <% end %>
+                    <p class="mt-0.5 text-xs text-base-content/30">
+                      {length(graph.memberships)} <%= if length(graph.memberships) == 1, do: "member", else: "members" %>
+                    </p>
+                  </div>
                 </button>
               </form>
             <% end %>
