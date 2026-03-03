@@ -29,9 +29,10 @@ import Graph from "graphology"
 import Sigma from "sigma"
 import forceAtlas2 from "graphology-layout-forceatlas2"
 import { createNodePiechartProgram } from "@sigma/node-piechart"
+import { NodeCircleProgram } from "sigma/rendering"
 
 // Synthesis node renderer: two equal slices, one per constituent graph.
-// Colors chosen to contrast with the green regular-node palette.
+// Colors chosen to contrast with the blue regular-node palette.
 const NodePiechartProgram = createNodePiechartProgram({
   defaultColor: "#9ca3af",
   slices: [
@@ -40,16 +41,58 @@ const NodePiechartProgram = createNodePiechartProgram({
   ],
 })
 
-// Isolated node renderer: two-tone red piechart so visually-disconnected nodes
-// are distinct from both regular nodes (green circles) and synthesis nodes (blue/amber).
-// slice_a=1, slice_b=0 → full dark-red disc with piechart border.
-const IsolatedNodeProgram = createNodePiechartProgram({
-  defaultColor: "#fca5a5",
-  slices: [
-    { color: { value: "#dc2626" }, value: { attribute: "slice_a" } },
-    { color: { value: "#fca5a5" }, value: { attribute: "slice_b" } },
-  ],
-})
+// Phong-shaded sphere program: extends NodeCircleProgram (inherits all attribute/
+// picking machinery) and replaces only the fragment shader with a per-pixel
+// Phong lighting model. Gives a mathematically correct 3D sphere at any zoom level.
+//
+// Light from upper-left (-x, +y in uv-space, angled toward the viewer).
+// Diffuse + specular (shininess=48) + ambient(0.2) → white specular highlight.
+const _PHONG_FRAG = `
+precision highp float;
+
+varying vec4 v_color;
+varying vec2 v_diffVector;
+varying float v_radius;
+
+uniform float u_correctionRatio;
+
+const vec4 transparent = vec4(0.0, 0.0, 0.0, 0.0);
+
+void main(void) {
+  float border  = u_correctionRatio * 2.0;
+  float rawDist = length(v_diffVector);
+  float dist    = rawDist - v_radius + border;  // <0 inside, >border outside
+
+  #ifdef PICKING_MODE
+    gl_FragColor = dist > border ? transparent : v_color;
+  #else
+    if (dist > border) { gl_FragColor = transparent; return; }
+
+    // Normalised position inside the disc: centre=(0,0), rim=1
+    vec2  uv = v_diffVector / max(v_radius, 0.001);
+    float r2 = dot(uv, uv);
+
+    // Clamp r2 to 1 so sqrt is safe in the anti-alias fringe
+    vec3  normal   = normalize(vec3(uv, sqrt(max(0.0, 1.0 - r2))));
+    vec3  lightDir = normalize(vec3(-0.55, 0.75, 0.50));
+    vec3  halfVec  = normalize(lightDir + vec3(0.0, 0.0, 1.0));
+
+    float diffuse  = max(dot(normal, lightDir), 0.0);
+    float spec     = pow(max(dot(normal, halfVec), 0.0), 48.0);
+
+    vec3  shaded = v_color.rgb * (0.20 + diffuse * 0.80) + vec3(spec * 0.65);
+    float alpha  = v_color.a * (1.0 - max(0.0, dist) / max(border, 0.001));
+
+    gl_FragColor = vec4(clamp(shaded, 0.0, 1.0), clamp(alpha, 0.0, 1.0));
+  #endif
+}
+`
+
+class NodeSphereProgram extends NodeCircleProgram {
+  getDefinition() {
+    return { ...super.getDefinition(), FRAGMENT_SHADER_SOURCE: _PHONG_FRAG }
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Sigma graph hook
@@ -81,6 +124,26 @@ const SigmaGraph = {
     this._isDragging = false           // true once drag threshold exceeded
     this._didDrag = false              // latches true after threshold; consumed by clickNode
     this._dragStartPos = null          // {x, y} viewport coords at mousedown
+    this._currentLayer = "all"         // last applied layer filter (for saving views)
+    this._currentType  = "all"         // last applied type filter
+    this._pendingViewId = null         // save ID being loaded — positions applied in graph_loaded handler
+    this._skipLayout = false           // set when saved-view positions are pre-loaded; skips FA2/auto-save
+    this._pendingOverlayRestore = null // overlay state to restore after layout (from a saved view)
+    this._mouseX = 0                   // cursor position relative to this.el, updated on mousemove
+    this._mouseY = 0
+
+    // Track cursor position for tooltip anchoring.
+    this._onMouseMove = (e) => {
+      const rect = this.el.getBoundingClientRect()
+      this._mouseX = e.clientX - rect.left
+      this._mouseY = e.clientY - rect.top
+      // Keep tooltip pinned near cursor while hovering a node.
+      if (this._highlightedNode) {
+        const tip = document.getElementById("node-tooltip")
+        if (tip && tip.style.display !== "none") this._positionTooltip(tip)
+      }
+    }
+    this.el.addEventListener("mousemove", this._onMouseMove)
 
     // Mount Sigma on a stable child div so LiveView re-renders don't destroy the canvas.
     this._container = document.createElement("div")
@@ -90,14 +153,70 @@ const SigmaGraph = {
     this.handleEvent("graph_loaded", (data) => {
       this._destroySigma()
       this._layoutDone = false
+      this._skipLayout = false
+      this._pendingOverlayRestore = null
       this._pendingNeighborhood = null
       this._pendingFocus = null
       this._exploredNodes = []
       this._minDegree = data.min_degree || 1
+      this._currentLayer = data.layer  || "all"
+      this._currentType  = data.type   || "all"
       this._inOverlay = false
       this._applyingOverlay = false
+      if (data.graph_id) this._graphId = data.graph_id
       if (data.full_reload) this._showOverlay()
       this._initSigma(data)
+      // Apply named-view positions directly into the freshly-built graph, before
+      // _runLayout fires. Set _skipLayout so _runLayout uses these positions without
+      // going through the auto-save round-trip (which could fail or use stale data).
+      if (this._pendingViewId) {
+        const save = this._listSaves().find(s => s.id === this._pendingViewId)
+        this._pendingViewId = null
+        if (save && save.positions && this.graph) {
+          this.graph.forEachNode((id) => {
+            if (save.positions[id]) {
+              this.graph.setNodeAttribute(id, "x", save.positions[id].x)
+              this.graph.setNodeAttribute(id, "y", save.positions[id].y)
+            }
+          })
+          this._skipLayout = true   // positions are already in the graph; skip FA2/auto-save
+          this._persistAutoSave()   // persist for subsequent filter-change reloads
+          // Restore neighborhood overlay if the view was saved in overlay mode
+          if (save.overlayState) this._pendingOverlayRestore = save.overlayState
+        }
+      }
+      this._renderSavedViewsPanel()
+    })
+
+    // Layout persistence — triggered by buttons via CustomEvent dispatch on this.el
+    this.el.addEventListener("show-save-view-dialog", () => this._showSaveViewDialog())
+    this.el.addEventListener("reset-layout", () => this._resetLayout())
+
+    // Saved-views list interactions — event delegation on the list container.
+    // Rendered items set data-load-view or data-delete-view attributes.
+    const savesList = document.getElementById("cy-saves-list")
+    if (savesList) {
+      savesList.addEventListener("click", (e) => {
+        const loadBtn   = e.target.closest("[data-load-view]")
+        const deleteBtn = e.target.closest("[data-delete-view]")
+        if (loadBtn)   this._loadView(loadBtn.dataset.loadView)
+        if (deleteBtn) this._deleteView(deleteBtn.dataset.deleteView)
+      })
+    }
+
+    // Save-view dialog confirm / cancel
+    const confirmBtn = document.getElementById("cy-save-view-confirm")
+    const cancelBtn  = document.getElementById("cy-save-view-cancel")
+    const nameInput  = document.getElementById("cy-save-view-name")
+    if (confirmBtn) confirmBtn.addEventListener("click", () => {
+      const name = nameInput.value.trim() || this._smartSaveName()
+      this._saveView(name)
+      this._hideSaveViewDialog()
+    })
+    if (cancelBtn) cancelBtn.addEventListener("click", () => this._hideSaveViewDialog())
+    if (nameInput) nameInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { confirmBtn && confirmBtn.click() }
+      if (e.key === "Escape") this._hideSaveViewDialog()
     })
 
     this.handleEvent("neighborhood_changed", (neighborhood) => {
@@ -115,17 +234,28 @@ const SigmaGraph = {
       }
     })
 
+    // Capture graph_id from the DOM attribute (set at mount time, stable across reloads).
+    this._graphId = this.el.dataset.graphId || null
+
+    // Populate saved views panel immediately (reads from localStorage).
+    this._renderSavedViewsPanel()
+
     const initialData = JSON.parse(this.el.dataset.graph)
     if (initialData.nodes && initialData.nodes.length > 0) {
       this._initSigma(initialData)
     }
   },
 
-  updated() {},
+  // Called after every LiveView re-render. Re-populate the saves panel because
+  // #cy-saves-list is in normal LiveView-managed DOM and gets reset by patches.
+  updated() {
+    this._renderSavedViewsPanel()
+  },
 
   destroyed() {
     if (this._resizeObserver) this._resizeObserver.disconnect()
     if (this._onDocMouseUp) document.removeEventListener("mouseup", this._onDocMouseUp)
+    if (this._onMouseMove) this.el.removeEventListener("mousemove", this._onMouseMove)
     this._destroySigma()
   },
 
@@ -238,6 +368,37 @@ const SigmaGraph = {
     setTimeout(() => this._fitToNodes(hoodSet), 50)
   },
 
+  // Restore a neighborhood overlay that was saved with a named view.
+  // Re-applies hide/dim state using the saved node set without re-running
+  // _concentricLayout (positions are already correct from the saved view).
+  _applyOverlayRestore(os) {
+    if (!this.sigma || !this.graph) return
+    const hoodSet = new Set((os.hoodNodeIds || []).filter(id => this.graph.hasNode(id)))
+    if (!hoodSet.size || !this.graph.hasNode(os.centerNodeId)) {
+      // Saved overlay is stale (nodes removed) — fall back to plain view
+      this._fitView()
+      return
+    }
+    this._selectedNode = os.centerNodeId
+    this._exploredNodes = (os.exploredNodeIds || []).filter(id => this.graph.hasNode(id))
+    this._trailNodes = new Set(this._exploredNodes.slice(0, -1))
+    this._inOverlay = true
+    this._overlayHidden = new Set()
+    this._overlayHiddenEdges = new Set()
+    this._dimmedNodes = new Set()
+    this._dimmedEdges = new Set()
+    this.graph.forEachNode((id) => {
+      if (!hoodSet.has(id)) this._overlayHidden.add(id)
+    })
+    this.graph.forEachEdge((id, _attrs, source, target) => {
+      if (!hoodSet.has(source) || !hoodSet.has(target)) this._overlayHiddenEdges.add(id)
+    })
+    this._renderExploredLabels()
+    this.sigma.refresh()
+    this._updateStats()
+    setTimeout(() => this._fitToNodes(hoodSet), 50)
+  },
+
   _applyFocusMode(neighborhoods) {
     const centerIds = new Set(neighborhoods.map(h => h.center_id))
     const allHoodIds = new Set()
@@ -278,24 +439,18 @@ const SigmaGraph = {
         }
       })
     }
-    // Color nodes and set type based on visible connectivity.
-    // Visually-isolated nodes (no visible edges) get the "isolated" piechart renderer;
-    // synthesis nodes restore their "piechart" type; regular nodes are left as default.
+    // Color nodes based on visible connectivity; mark isolated for ring placement.
+    // Sphere nodes change color only (no type switch); dark-red tints the sphere texture.
     this.graph.forEachNode((id) => {
       if (this._hiddenNodes.has(id)) return
       const hasVisibleEdge = this.graph.someEdge(id, (eid) => !this._hiddenEdges.has(eid))
-      const isSynthesis = this.graph.getNodeAttribute(id, "node_type") === "synthesis"
-      if (hasVisibleEdge) {
-        this.graph.setNodeAttribute(id, "_color", sigmaNodeColor(this.graph.degree(id), this._maxDegree))
-        this.graph.setNodeAttribute(id, "type", isSynthesis ? "piechart" : undefined)
-        this.graph.setNodeAttribute(id, "slice_a", isSynthesis ? 1 : 0)
-        this.graph.setNodeAttribute(id, "slice_b", isSynthesis ? 1 : 0)
-      } else {
-        this.graph.setNodeAttribute(id, "_color", "#f87171")
-        this.graph.setNodeAttribute(id, "type", "isolated")
-        this.graph.setNodeAttribute(id, "slice_a", 1)
-        this.graph.setNodeAttribute(id, "slice_b", 1)  // equal halves → visible bicolor disc
-      }
+      const isolated = !hasVisibleEdge
+      this.graph.setNodeAttribute(id, "_isolated", isolated)
+      this.graph.setNodeAttribute(id, "_color",
+        isolated
+          ? "#dc2626"  // dark red — tints the sphere texture red
+          : sigmaNodeColor(this.graph.degree(id), this._maxDegree)
+      )
     })
   },
 
@@ -367,6 +522,19 @@ const SigmaGraph = {
     this._fitToNodes(new Set(visibleIds))
   },
 
+  // Position the tooltip div near the current cursor, flipping left if needed.
+  _positionTooltip(tip) {
+    const tipW = 260
+    const containerW = this.el.offsetWidth
+    const containerH = this.el.offsetHeight
+    const x = this._mouseX
+    const y = this._mouseY
+    const tx = (x + 18 + tipW > containerW) ? x - tipW - 12 : x + 18
+    const ty = Math.min(y + 12, containerH - 80)
+    tip.style.left = `${tx}px`
+    tip.style.top  = `${ty}px`
+  },
+
   _renderExploredLabels() {
     const container = document.getElementById("cy-explored-labels")
     if (!container) return
@@ -391,7 +559,10 @@ const SigmaGraph = {
       }
       const text = document.createElement("span")
       text.textContent = label
-      text.style.cssText = "overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"
+      // Current node: show full summary text (wrapping); trail nodes: truncate.
+      text.style.cssText = isCurrent
+        ? "white-space:normal;word-break:break-word;line-height:1.35;"
+        : "overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"
       el.appendChild(text)
       if (!isCurrent) {
         el.addEventListener("click", () => this.pushEvent("unwind_to", {id}))
@@ -409,13 +580,13 @@ const SigmaGraph = {
       const isSynthesis = d.node_type === "synthesis"
       this.graph.addNode(d.id, {
         label: d.label || d.id,
-        // Store semantic type separately — Sigma uses `type` to pick the renderer,
-        // so we only set it for nodes that need a custom program.
         semanticType: d.type,
         node_type: d.node_type || "claim",
-        type: isSynthesis ? "piechart" : undefined,
+        // Synthesis nodes use the piechart renderer; all others use the sphere.
+        type: isSynthesis ? "piechart" : "sphere",
         slice_a: isSynthesis ? 1 : 0,
         slice_b: isSynthesis ? 1 : 0,
+        _isolated: false,
         corpus_layer: d.corpus_layer,
         confidence: d.confidence ?? 1.0,
         human_validated: d.human_validated ?? false,
@@ -463,7 +634,7 @@ const SigmaGraph = {
       renderEdgeLabels: false,
       defaultEdgeType: "arrow",
       zIndex: true,   // respect zIndex returned by reducers
-      nodeProgramClasses: { piechart: NodePiechartProgram, isolated: IsolatedNodeProgram },
+      nodeProgramClasses: { piechart: NodePiechartProgram, sphere: NodeSphereProgram },
       nodeReducer: (id, attrs) => this._nodeReducer(id, attrs, colors),
       edgeReducer: (id, attrs) => this._edgeReducer(id, attrs, colors),
     })
@@ -489,9 +660,24 @@ const SigmaGraph = {
       this._hoveredNeighbors = new Set(this.graph.neighbors(node))
       this._hoveredEdges = new Set()
       this.graph.forEachEdge(node, (id) => this._hoveredEdges.add(id))
-      const label = this.graph.getNodeAttribute(node, "label") || node
-      const text = document.getElementById("cy-hover-text")
-      if (text) { text.textContent = label; text.style.display = "block" }
+      const attrs = this.graph.getNodeAttributes(node)
+      const label = attrs.label || node
+      const conf = attrs.confidence ?? 1.0
+      const pct = Math.round(conf * 100)
+      const tip = document.getElementById("node-tooltip")
+      if (tip) {
+        tip.innerHTML =
+          `<p style="font-weight:500;line-height:1.4;">${escHtml(label)}</p>` +
+          `<div style="display:flex;align-items:center;gap:6px;margin-top:6px;padding-top:6px;border-top:1px solid rgba(128,128,128,0.2)">` +
+            `<span style="font-size:11px;opacity:0.5;white-space:nowrap">Confidence</span>` +
+            `<div style="flex:1;height:4px;border-radius:2px;background:rgba(128,128,128,0.2);overflow:hidden">` +
+              `<div style="height:100%;border-radius:2px;background:var(--color-primary);width:${pct}%"></div>` +
+            `</div>` +
+            `<span style="font-size:11px;opacity:0.6;font-variant-numeric:tabular-nums">${pct}%</span>` +
+          `</div>`
+        this._positionTooltip(tip)
+        tip.style.display = "block"
+      }
       this.sigma.refresh()
     })
 
@@ -499,8 +685,8 @@ const SigmaGraph = {
       this._highlightedNode = null
       this._hoveredNeighbors = new Set()
       this._hoveredEdges = new Set()
-      const text = document.getElementById("cy-hover-text")
-      if (text) text.style.display = "none"
+      const tip = document.getElementById("node-tooltip")
+      if (tip) { tip.style.display = "none"; tip.innerHTML = "" }
       this.sigma.refresh()
     })
 
@@ -554,16 +740,249 @@ const SigmaGraph = {
 
   _runLayout(nodeCount) {
     if (nodeCount === 0) {
-      this._onLayoutDone()
+      this._onLayoutDone(true)
       return
     }
-    // ForceAtlas2 for all sizes — scale iterations down for large graphs.
+
+    // Named-view positions were pre-loaded into the graph in the graph_loaded handler.
+    // Skip auto-save restoration and FA2 — positions are already correct.
+    if (this._skipLayout) {
+      this._skipLayout = false
+      this._onLayoutDone(true)
+      return
+    }
+
+    // Priority 1: auto-save (transparent single slot, persists across filter changes).
+    const saved = this._loadSavedLayout()
+    if (saved) {
+      let restored = 0
+      this.graph.forEachNode((id) => {
+        if (saved[id]) {
+          this.graph.setNodeAttribute(id, "x", saved[id].x)
+          this.graph.setNodeAttribute(id, "y", saved[id].y)
+          restored++
+        }
+      })
+      if (restored > 0) {
+        this._onLayoutDone(true)  // skip placement — saved positions already include ring/separation
+        return
+      }
+    }
+
+    // Priority 3: ForceAtlas2 for all sizes — scale iterations down for large graphs.
     const iterations = nodeCount > 500 ? 30 : nodeCount > 150 ? 80 : 300
+    const fa2Settings = forceAtlas2.inferSettings(this.graph)
     forceAtlas2.assign(this.graph, {
       iterations,
-      settings: forceAtlas2.inferSettings(this.graph),
+      settings: { ...fa2Settings, scalingRatio: fa2Settings.scalingRatio * 1.2 },
     })
+    this._persistAutoSave()  // snapshot FA2 result so filter changes don't scramble it
     this._onLayoutDone()
+  },
+
+  _layoutStorageKey() {
+    return this._graphId ? `sigma_layout:${this._graphId}` : null
+  },
+
+  _loadSavedLayout() {
+    const key = this._layoutStorageKey()
+    if (!key) return null
+    try {
+      const raw = localStorage.getItem(key)
+      return raw ? JSON.parse(raw) : null
+    } catch { return null }
+  },
+
+  // ---------------------------------------------------------------------------
+  // Auto-save (single slot) — transparent background persistence.
+  // Preserves layout across filter/degree changes without user action.
+  // ---------------------------------------------------------------------------
+
+  _persistAutoSave() {
+    const key = this._layoutStorageKey()
+    if (!key || !this.graph) return
+    const positions = {}
+    this.graph.forEachNode((id) => {
+      positions[id] = {
+        x: this.graph.getNodeAttribute(id, "x"),
+        y: this.graph.getNodeAttribute(id, "y"),
+      }
+    })
+    try { localStorage.setItem(key, JSON.stringify(positions)) }
+    catch (e) { console.warn("auto-save failed", e) }
+  },
+
+  _resetLayout() {
+    const key = this._layoutStorageKey()
+    if (key) localStorage.removeItem(key)
+    this._pendingViewId = null
+    this.graph.forEachNode((id) => {
+      this.graph.setNodeAttribute(id, "x", (Math.random() - 0.5) * 500)
+      this.graph.setNodeAttribute(id, "y", (Math.random() - 0.5) * 500)
+    })
+    this._runLayout(this.graph.order)
+  },
+
+  // ---------------------------------------------------------------------------
+  // Named saved views
+  // ---------------------------------------------------------------------------
+
+  _savesStorageKey() {
+    return this._graphId ? `sigma_saves:${this._graphId}` : null
+  },
+
+  _listSaves() {
+    const key = this._savesStorageKey()
+    if (!key) return []
+    try { return JSON.parse(localStorage.getItem(key) || "[]") }
+    catch { return [] }
+  },
+
+  _persistSaves(saves) {
+    const key = this._savesStorageKey()
+    if (!key) return
+    try { localStorage.setItem(key, JSON.stringify(saves)) }
+    catch (e) { console.warn("saves persist failed", e) }
+  },
+
+  _saveView(name) {
+    const saves = this._listSaves()
+    if (saves.length >= 20) {
+      this._showToast("20 saved views — delete one before saving again.", "warning")
+      return
+    }
+    const positions = {}
+    this.graph.forEachNode((id) => {
+      positions[id] = {
+        x: this.graph.getNodeAttribute(id, "x"),
+        y: this.graph.getNodeAttribute(id, "y"),
+      }
+    })
+    // Capture neighborhood overlay state so loading restores the full view.
+    // hoodNodeIds = every node that is currently visible (not overlay-hidden).
+    let overlayState = null
+    if (this._inOverlay && this._selectedNode) {
+      const hoodNodeIds = []
+      this.graph.forEachNode(id => { if (!this._overlayHidden.has(id)) hoodNodeIds.push(id) })
+      overlayState = {
+        centerNodeId: this._selectedNode,
+        exploredNodeIds: [...this._exploredNodes],
+        hoodNodeIds,
+      }
+    }
+    const save = {
+      id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      name: name.slice(0, 80),
+      savedAt: new Date().toISOString(),
+      positions,
+      minDegree: this._minDegree,
+      layer: this._currentLayer,
+      type: this._currentType,
+      overlayState,
+    }
+    saves.unshift(save)  // newest first
+    this._persistSaves(saves)
+    this._persistAutoSave()  // keep auto-save in sync with the named view
+    this._renderSavedViewsPanel()
+    this._showToast(`Saved "${save.name}"`, "success")
+  },
+
+  _deleteView(id) {
+    const saves = this._listSaves().filter(s => s.id !== id)
+    this._persistSaves(saves)
+    this._renderSavedViewsPanel()
+  },
+
+  _loadView(id) {
+    const save = this._listSaves().find(s => s.id === id)
+    if (!save) return
+    this._pendingViewId = id
+    this.pushEvent("load_saved_view", {
+      min_degree: save.minDegree,
+      layer: save.layer || "all",
+      type: save.type || "all",
+    })
+  },
+
+  _renderSavedViewsPanel() {
+    const list  = document.getElementById("cy-saves-list")
+    const count = document.getElementById("cy-saves-count")
+    if (!list) return
+    const saves = this._listSaves()
+    if (count) count.textContent = `${saves.length} of 20`
+    if (saves.length === 0) {
+      list.innerHTML = '<p class="text-xs text-base-content/30 italic px-2 py-1">No saved views yet.</p>'
+      return
+    }
+    list.innerHTML = saves.map(s => {
+      const date = new Date(s.savedAt).toLocaleDateString(undefined, { month: "short", day: "numeric" })
+      const name = escHtml(s.name)
+      return `
+        <div class="flex items-center gap-1 group/item rounded hover:bg-base-200 transition-colors">
+          <button data-load-view="${s.id}"
+            class="flex-1 min-w-0 text-left text-xs truncate px-2 py-1.5"
+            title="${name}">${name}</button>
+          <span class="text-xs text-base-content/30 shrink-0 pr-1 tabular-nums">${date}</span>
+          <button data-delete-view="${s.id}"
+            class="opacity-0 group-hover/item:opacity-100 text-error hover:bg-error/10 rounded px-1.5 py-1 text-sm leading-none transition-all shrink-0"
+            title="Delete">×</button>
+        </div>`
+    }).join("")
+  },
+
+  _showSaveViewDialog() {
+    const dialog = document.getElementById("cy-save-view-dialog")
+    const input  = document.getElementById("cy-save-view-name")
+    if (!dialog || !input) return
+    input.value = this._smartSaveName()
+    dialog.style.display = "block"
+    input.focus()
+    input.select()
+    // Dismiss on outside click (defer so this click doesn't immediately close it)
+    this._dismissSaveDialog = (e) => {
+      if (!dialog.contains(e.target) && e.target.id !== "cy-save-view-btn")
+        this._hideSaveViewDialog()
+    }
+    setTimeout(() => document.addEventListener("click", this._dismissSaveDialog), 0)
+  },
+
+  _hideSaveViewDialog() {
+    const dialog = document.getElementById("cy-save-view-dialog")
+    if (dialog) dialog.style.display = "none"
+    if (this._dismissSaveDialog) {
+      document.removeEventListener("click", this._dismissSaveDialog)
+      this._dismissSaveDialog = null
+    }
+  },
+
+  _smartSaveName() {
+    // 1. Label of the most recently explored node
+    if (this._exploredNodes.length > 0) {
+      const id = this._exploredNodes[this._exploredNodes.length - 1]
+      const label = this.graph && this.graph.hasNode(id)
+        ? this.graph.getNodeAttribute(id, "label")
+        : null
+      if (label) return label.slice(0, 60)
+    }
+    // 2. Current focus textarea value
+    const focusInput = document.querySelector('textarea[name="prompt"]')
+    if (focusInput && focusInput.value.trim()) return focusInput.value.trim().slice(0, 60)
+    // 3. Date fallback
+    return `View ${new Date().toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })}`
+  },
+
+  _showToast(msg, type = "info") {
+    const colors = {
+      success: "bg-success text-success-content",
+      warning: "bg-warning text-warning-content",
+      info:    "bg-base-200 text-base-content",
+    }
+    const el = document.createElement("div")
+    el.className = `fixed bottom-16 right-4 z-50 rounded-lg px-3 py-2 text-xs font-medium shadow-lg ${colors[type] || colors.info}`
+    el.style.transition = "opacity 0.3s"
+    el.textContent = msg
+    document.body.appendChild(el)
+    setTimeout(() => { el.style.opacity = "0"; setTimeout(() => el.remove(), 300) }, 2200)
   },
 
   // Place visually-isolated nodes (type:"isolated", set by _applyDegreeFilter) on a
@@ -575,7 +994,7 @@ const SigmaGraph = {
 
     this.graph.forEachNode((id) => {
       if (this._hiddenNodes.has(id)) return
-      if (this.graph.getNodeAttribute(id, "type") === "isolated") {
+      if (this.graph.getNodeAttribute(id, "_isolated")) {
         isolated.push(id)
       } else {
         const x = this.graph.getNodeAttribute(id, "x")
@@ -668,18 +1087,29 @@ const SigmaGraph = {
     }
   },
 
-  _onLayoutDone() {
+  _onLayoutDone(skipPlacement = false) {
     this._layoutDone = true
     this._applyDegreeFilter()
-    this._placeIsolatedNodes()  // must run after _applyDegreeFilter sets type:"isolated"
-    this._separateComponents()  // must run after _applyDegreeFilter sets _hiddenNodes
+    // Only re-place isolated nodes and separate components when positions came from FA2.
+    // When restoring saved positions the layout is already correct — re-running placement
+    // would overwrite the saved ring/component positions with freshly-calculated ones.
+    if (!skipPlacement) {
+      this._placeIsolatedNodes()
+      this._separateComponents()
+    }
     this._hideOverlay()
     this.sigma.refresh()
     this._updateStats()
     // Defer fit: getNodeDisplayData is only populated after Sigma's first render pass.
     setTimeout(() => {
-      this._fitView()
-      this._applyPendingOverlay()
+      if (this._pendingOverlayRestore) {
+        const os = this._pendingOverlayRestore
+        this._pendingOverlayRestore = null
+        this._applyOverlayRestore(os)
+      } else {
+        this._fitView()
+        this._applyPendingOverlay()
+      }
     }, 50)
   },
 
@@ -707,8 +1137,8 @@ const SigmaGraph = {
       y: attrs.y,
       size: attrs._size || 8,
       color: attrs._color || colors.neutral,
-      type: attrs.type,       // "piechart" (SN), "isolated", or undefined (regular)
-      slice_a: attrs.slice_a,
+      type: attrs.type,        // "sphere" (regular/isolated) or "piechart" (synthesis)
+      slice_a: attrs.slice_a,  // piechart slices for synthesis nodes
       slice_b: attrs.slice_b,
       hidden: false,
       // Degree-based zIndex 0–10; trail=20, selected/hover=30 always on top.
@@ -808,9 +1238,14 @@ function edgeTypeColor(type) {
   return EDGE_COLORS[Math.abs(hash) % EDGE_COLORS.length]
 }
 
+// Escape HTML special chars for safe insertion into innerHTML strings.
+function escHtml(str) {
+  return String(str).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;")
+}
+
 function sigmaNodeSize(deg) {
-  // Minimum 5 so isolated (0-edge) nodes are visible; scale logarithmically from there.
-  return 5 + Math.log1p(deg) * 2.5
+  // Minimum 5 so isolated (0-edge) nodes are visible; wider range for better visual hierarchy.
+  return 5 + Math.log1p(deg) * 4.0
 }
 
 // Sigma's parseColor only handles hex and rgb() — no hsl(), no oklch().
@@ -829,9 +1264,9 @@ function hslToHex(h, s, l) {
 function sigmaNodeColor(deg, maxDeg) {
   if (deg === 0) return "#f87171"  // red-400: isolated nodes stand out
   const t = Math.log1p(deg) / Math.log1p(Math.max(maxDeg, 1))
-  // Tailwind green range: 142° hue. Bright mint → rich forest green.
-  const lightness = Math.round(65 - t * 23)
-  return hslToHex(142, 76, lightness)
+  // Blue range: 214° hue. Sky-blue (low degree) → deep royal blue (high degree).
+  const lightness = Math.round(72 - t * 32)
+  return hslToHex(214, 80, lightness)
 }
 
 // Force any CSS color string (including oklch, hsl) to a hex value by

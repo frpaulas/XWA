@@ -468,6 +468,16 @@ defmodule XwaWeb.GraphLive do
     {:noreply, socket}
   end
 
+  # Called by the JS hook when the user loads a named saved view.
+  # Restores filter state; the hook applies saved node positions on the resulting graph_loaded event.
+  def handle_event("load_saved_view", %{"min_degree" => min_degree, "layer" => layer, "type" => type}, socket) do
+    min_degree = String.to_integer(to_string(min_degree))
+    layer = if layer in ["", nil], do: "all", else: layer
+    type = if type in ["", nil], do: "all", else: type
+    socket = apply_filters(socket, layer, type, socket.assigns.search, min_degree, true)
+    {:noreply, socket}
+  end
+
   # ---------------------------------------------------------------------------
   # Private
   # ---------------------------------------------------------------------------
@@ -503,6 +513,9 @@ defmodule XwaWeb.GraphLive do
     event_data =
       graph_data
       |> Map.put(:min_degree, min_degree)
+      |> Map.put(:graph_id, socket.assigns.current_scope.graph_id)
+      |> Map.put(:layer, layer)
+      |> Map.put(:type, type)
       |> then(&if full_reload, do: Map.put(&1, :full_reload, true), else: &1)
 
     socket
@@ -644,6 +657,20 @@ defmodule XwaWeb.GraphLive do
 
         <%!-- Left sidebar: focus/explore + filters --%>
         <div class="w-56 shrink-0 border-r border-base-200 bg-base-100 flex flex-col overflow-y-auto">
+
+          <%!-- Saved Views --%>
+          <details id="saved-views-panel" class="group border-b border-base-200">
+            <summary class="flex items-center justify-between px-4 py-2.5 cursor-pointer list-none [&::-webkit-details-marker]:hidden">
+              <span class="text-xs font-semibold uppercase tracking-wider text-base-content/50">Saved views</span>
+              <div class="flex items-center gap-1.5">
+                <span id="cy-saves-count" class="text-xs text-base-content/30">0 of 20</span>
+                <svg class="w-3 h-3 text-base-content/40 transition-transform group-open:rotate-180" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7" /></svg>
+              </div>
+            </summary>
+            <div id="cy-saves-list" class="px-2 pb-2 space-y-0.5">
+              <p class="text-xs text-base-content/30 italic px-2 py-1">No saved views yet.</p>
+            </div>
+          </details>
 
           <%!-- Focus / Explore panel --%>
           <%= if @focus_mode do %>
@@ -970,10 +997,8 @@ defmodule XwaWeb.GraphLive do
             phx-update="ignore"
             class="absolute top-3 left-3 z-20 flex flex-col gap-1 max-w-xs"
           >
-            <%!-- Explored node labels — clickable back buttons --%>
+            <%!-- Explored node labels — clickable back buttons; current node shows full summary --%>
             <div id="cy-explored-labels" class="flex flex-col gap-1"></div>
-            <%!-- Current hover label sits below the trail --%>
-            <span id="cy-hover-text" class="pointer-events-none text-sm font-medium text-base-content bg-base-100/90 backdrop-blur-sm px-3 py-1 rounded-lg shadow border border-base-300 truncate" style="display:none;"></span>
           </div>
           <%!-- Canvas: always in DOM so LiveView patches rather than replaces it --%>
           <div
@@ -981,12 +1006,20 @@ defmodule XwaWeb.GraphLive do
             phx-hook="SigmaGraph"
             phx-update="ignore"
             data-graph={Jason.encode!(@graph_data)}
+            data-graph-id={@current_scope.graph_id}
             data-neighborhood={Jason.encode!(@neighborhood)}
             data-focus={Jason.encode!(@focus_neighborhoods)}
             class={[if(@connect_from, do: "cursor-crosshair", else: "")]}
             style="position:absolute;top:0;right:0;bottom:0;left:0;"
           >
           </div>
+          <%!-- Floating node tooltip: appears anchored to hovered node --%>
+          <div
+            id="node-tooltip"
+            phx-update="ignore"
+            class="pointer-events-none absolute z-30 max-w-xs bg-base-100/95 backdrop-blur-sm rounded-lg shadow-lg border border-base-300 px-3 py-2 text-sm text-base-content"
+            style="display:none;"
+          ></div>
           <%!-- Connect banner --%>
           <%= if @connect_from do %>
             <div class="absolute top-3 left-1/2 -translate-x-1/2 z-10 flex items-center gap-3 rounded-xl bg-primary px-4 py-2.5 shadow-lg">
@@ -997,7 +1030,36 @@ defmodule XwaWeb.GraphLive do
               </button>
             </div>
           <% end %>
-          <div class="absolute bottom-3 right-3 flex gap-1.5">
+          <%!-- Save view dialog (shown by JS when user clicks Save view) --%>
+          <div
+            id="cy-save-view-dialog"
+            style="display:none"
+            class="absolute bottom-14 right-3 z-30 w-72 rounded-xl border border-base-300 bg-base-100 p-3 shadow-xl"
+          >
+            <p class="mb-2 text-xs font-medium text-base-content">Name this view</p>
+            <input
+              id="cy-save-view-name"
+              type="text"
+              class="mb-2 w-full rounded-lg border border-base-300 bg-base-200/50 px-2.5 py-1.5 text-xs focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary"
+              placeholder="View name…"
+            />
+            <div class="flex justify-end gap-1.5">
+              <button id="cy-save-view-cancel" class="rounded-lg px-2.5 py-1 text-xs text-base-content/50 hover:bg-base-200 transition-colors">Cancel</button>
+              <button id="cy-save-view-confirm" class="rounded-lg bg-primary px-2.5 py-1 text-xs font-medium text-primary-content hover:brightness-110 transition-all">Save</button>
+            </div>
+          </div>
+          <div class="absolute bottom-3 right-3 flex items-center gap-1.5">
+            <button
+              id="cy-save-view-btn"
+              onclick="document.getElementById('cy').dispatchEvent(new CustomEvent('show-save-view-dialog'))"
+              class="rounded-lg bg-base-100/90 border border-base-200 px-2.5 py-1 text-xs text-base-content/50 backdrop-blur-sm hover:text-base-content hover:border-base-300 transition-colors"
+              title="Save current view (layout + filters)"
+            >Save view</button>
+            <button
+              onclick="document.getElementById('cy').dispatchEvent(new CustomEvent('reset-layout'))"
+              class="rounded-lg bg-base-100/90 border border-base-200 px-2.5 py-1 text-xs text-base-content/50 backdrop-blur-sm hover:text-base-content hover:border-base-300 transition-colors"
+              title="Clear saved layout and rerun auto-layout"
+            >Reset layout</button>
             <div id="cy-graph-stats" class="rounded-lg bg-base-100/90 border border-base-200 px-2.5 py-1 text-xs text-base-content/50 backdrop-blur-sm">
               {@graph_data.nodes |> length()} nodes · {@graph_data.edges |> length()} edges
             </div>
