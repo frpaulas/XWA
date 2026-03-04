@@ -16,6 +16,13 @@ Document metadata:
 - Source type: {{source_type}}    (aspirational | operational | external)
 - Document date: {{document_date}}
 
+If the document begins with a bracketed header like
+`[Witness Testimony [lines N–M] — Witness: Name (Affiliation)]`,
+treat that as speaker attribution metadata, not as document content.
+Attribute extracted claims to that speaker by name in the `content` field
+(e.g. "Eric Schmidt argues that..." rather than a generic third-person form).
+The header itself is not a claim.
+
 Use the corpus layer and source type to calibrate extraction:
 - self_description / aspirational documents are dense with claims by design —
   be appropriately selective; not every stated goal is a meaningful claim

@@ -29,7 +29,7 @@ defmodule Xwa.Ingestion.IngestionWorker do
 
   alias Xwa.Documents
   alias Xwa.Graph.{Nodes, Edges}
-  alias Xwa.Ingestion.{ClaimExtractor, EdgeExtractor, ExtractionRuns, VoyageEmbedder}
+  alias Xwa.Ingestion.{ClaimExtractor, EdgeExtractor, ExtractionRuns, HearingSegmenter, VoyageEmbedder}
 
   @neighbourhood_size 20
   @prompt_version "v1"
@@ -49,7 +49,7 @@ defmodule Xwa.Ingestion.IngestionWorker do
     result =
       with {:ok, doc, text} <- load_content(document_id, requesting_user_id),
            :ok <- advance_status(doc, "processing"),
-           {:ok, nodes} <- extract_claims(doc, text, requesting_user_id, graph_id),
+           {:ok, nodes} <- extract_all_claims(doc, text, requesting_user_id, graph_id),
            :ok <- insert_nodes_and_edges(nodes, doc, requesting_user_id, graph_id),
            :ok <- insert_wiki_links(text, nodes, doc, requesting_user_id, graph_id),
            :ok <- embed_nodes(nodes, doc, graph_id) do
@@ -114,19 +114,45 @@ defmodule Xwa.Ingestion.IngestionWorker do
     end
   end
 
-  defp extract_claims(doc, text, requesting_user_id, graph_id) do
+  # Segments the document if it's a congressional hearing, then extracts claims
+  # from each segment in sequence. For all other source types, falls through to
+  # a single extraction pass (segment = the whole document text).
+  defp extract_all_claims(doc, text, requesting_user_id, graph_id) do
+    segments =
+      if doc.source_type == "congressional_hearing" do
+        HearingSegmenter.segment(text)
+      else
+        [%{text: text, from_line: nil, to_line: nil, segment_type: nil, speaker: nil}]
+      end
+
+    Enum.reduce_while(segments, {:ok, []}, fn seg, {:ok, acc} ->
+      case extract_claims(doc, seg, requesting_user_id, graph_id) do
+        {:ok, nodes} -> {:cont, {:ok, acc ++ nodes}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  defp extract_claims(doc, %{text: text} = segment, requesting_user_id, graph_id) do
     context = %{
       document_id: doc.id,
       graph_id: graph_id,
       corpus_layer: doc.corpus_layer,
       source_type: doc.source_type,
       document_date: doc.document_date,
-      created_by: requesting_user_id
+      created_by: requesting_user_id,
+      # Segment provenance — passed through to the prompt and node metadata
+      speaker: Map.get(segment, :speaker),
+      segment_type: Map.get(segment, :segment_type),
+      from_line: Map.get(segment, :from_line),
+      to_line: Map.get(segment, :to_line)
     }
+
+    enriched_text = prepend_speaker_context(text, segment)
 
     t0 = System.monotonic_time(:millisecond)
 
-    case ClaimExtractor.extract(text, context) do
+    case ClaimExtractor.extract(enriched_text, context) do
       {:ok, nodes, usage} ->
         duration_ms = System.monotonic_time(:millisecond) - t0
 
@@ -384,6 +410,39 @@ defmodule Xwa.Ingestion.IngestionWorker do
         :ok
     end
   end
+
+  # ---------------------------------------------------------------------------
+  # Segment text enrichment
+  # ---------------------------------------------------------------------------
+
+  # Prepends a compact speaker/provenance header to the segment text so that
+  # the claim extractor has attribution context without requiring prompt changes.
+  # No-ops when the segment carries no speaker metadata (non-hearing documents).
+  defp prepend_speaker_context(text, %{speaker: nil}), do: text
+  defp prepend_speaker_context(text, %{speaker: speaker, segment_type: seg_type, from_line: from, to_line: to}) do
+    role_label = case speaker[:role] do
+      :chair           -> "Committee Chair"
+      :ranking_member  -> "Ranking Member"
+      :witness         -> "Witness"
+      _                -> "Member of Congress"
+    end
+
+    affiliation = if speaker[:affiliation], do: " (#{speaker[:affiliation]})", else: ""
+
+    type_label = case seg_type do
+      :opening_statement -> "Opening Statement"
+      :witness_statement -> "Witness Testimony"
+      :qa_turn           -> "Q&A"
+      _                  -> "Statement"
+    end
+
+    lines_label = if from && to, do: " [lines #{from}–#{to}]", else: ""
+
+    header = "[#{type_label}#{lines_label} — #{role_label}: #{speaker[:name]}#{affiliation}]"
+
+    "#{header}\n\n#{text}"
+  end
+  defp prepend_speaker_context(text, _), do: text
 
   # ---------------------------------------------------------------------------
   # ExtractionRun logging
