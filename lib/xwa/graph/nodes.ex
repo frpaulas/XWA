@@ -499,6 +499,66 @@ defmodule Xwa.Graph.Nodes do
   end
 
   @doc """
+  Returns `{id, embedding}` pairs for all nodes in the given graph(s) that
+  have a non-nil embedding. Intentionally lean — does not load other fields.
+
+  Used by `SimilarityMerger` to build the cross-graph similarity matrix.
+  """
+  @spec list_embeddings(String.t() | [String.t()]) ::
+          {:ok, [{String.t(), [float()]}]} | {:error, any()}
+  def list_embeddings(graph_id) when is_binary(graph_id), do: list_embeddings([graph_id])
+
+  def list_embeddings(graph_ids) when is_list(graph_ids) do
+    cypher = """
+    MATCH (n:Claim)
+    WHERE n.graph_id IN $graph_ids AND n.embedding IS NOT NULL
+    RETURN n.id AS id, n.embedding AS embedding
+    """
+
+    case Graph.query(cypher, %{graph_ids: graph_ids}) do
+      {:ok, rows} ->
+        pairs = Enum.map(rows, fn %{"id" => id, "embedding" => emb} -> {id, emb} end)
+        {:ok, pairs}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  @doc """
+  Returns `{id, text}` pairs for nodes in the given graph(s) that have no
+  embedding yet. `text` is `summary` if present, otherwise `content`.
+
+  Used by the backfill task and ingestion worker to know what to embed.
+  """
+  @spec list_missing_embeddings(String.t() | [String.t()]) ::
+          {:ok, [{String.t(), String.t()}]} | {:error, any()}
+  def list_missing_embeddings(graph_id) when is_binary(graph_id) do
+    list_missing_embeddings([graph_id])
+  end
+
+  def list_missing_embeddings(graph_ids) when is_list(graph_ids) do
+    cypher = """
+    MATCH (n:Claim)
+    WHERE n.graph_id IN $graph_ids AND n.embedding IS NULL
+    RETURN n.id AS id, coalesce(n.summary, n.content) AS text
+    """
+
+    case Graph.query(cypher, %{graph_ids: graph_ids}) do
+      {:ok, rows} ->
+        pairs =
+          rows
+          |> Enum.filter(fn %{"text" => text} -> is_binary(text) and text != "" end)
+          |> Enum.map(fn %{"id" => id, "text" => text} -> {id, text} end)
+
+        {:ok, pairs}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  @doc """
   Deletes a Claim node and all its relationships.
   """
   @spec delete(String.t()) :: :ok | {:error, any()}

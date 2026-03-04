@@ -20,6 +20,10 @@ defmodule XwaWeb.Router do
 
     get "/", PageController, :home
     post "/graph/switch", GraphController, :switch
+
+    # Local username/password login
+    get "/login", LocalSessionController, :new
+    post "/login", LocalSessionController, :create
   end
 
   scope "/", XwaWeb do
@@ -34,6 +38,12 @@ defmodule XwaWeb.Router do
     live_session :admin,
       on_mount: {XwaWeb.Plugs.RequireAdmin, :require_admin} do
       live "/admin/upload", AdminUploadLive
+    end
+
+    # Public read-only demo — loads govinfo's graph without requiring auth.
+    live_session :demo,
+      on_mount: {XwaWeb.DemoMount, :demo} do
+      live "/demo", GraphLive
     end
   end
 

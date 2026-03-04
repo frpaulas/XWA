@@ -60,6 +60,7 @@ defmodule Xwa.MixProject do
        depth: 1},
       {:swoosh, "~> 1.16"},
       {:req, "~> 0.5"},
+      {:bcrypt_elixir, "~> 3.0"},
       {:ueberauth, "~> 0.10"},
       {:ueberauth_google, "~> 0.12"},
       {:ueberauth_github, "~> 0.8"},

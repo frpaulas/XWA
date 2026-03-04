@@ -37,4 +37,13 @@ npm-debug.log
 
 # Local environment variables (secrets)
 .env
+.envrc
 
+# Local test data (not for version control)
+/testdata/
+
+# Local notes
+/notes/
+
+# Memgraph platform (docker/local infra)
+/memgraph-platform/

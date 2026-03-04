@@ -2,18 +2,12 @@ defmodule Xwa.Accounts do
   @moduledoc """
   Context for managing user accounts.
 
-  Users are created exclusively through OAuth providers (Google, GitHub).
-  There are no passwords — authentication is entirely delegated to the provider.
+  Supports two authentication modes:
 
-  ## Find or create pattern
+  * **OAuth** (Google, GitHub) — `find_or_create_from_oauth/1`
+  * **Local** (username + bcrypt password) — `create_local_user/2` / `authenticate_local_user/2`
 
-  On every successful OAuth callback, `find_or_create_from_oauth/1` is called
-  with the `Ueberauth.Auth` struct. If a user with that provider + provider_id
-  already exists, they are returned as-is. If not, a new user record is created.
-
-  This means a user who signs in with Google and a user who signs in with GitHub
-  using the same email address are treated as two separate accounts. This is
-  intentional — email addresses are not reliable cross-provider identifiers.
+  OAuth users have no password; local users have no email.
   """
 
   require Logger
@@ -43,6 +37,62 @@ defmodule Xwa.Accounts do
   def get_user_by_provider(provider, provider_id)
       when is_binary(provider) and is_binary(provider_id) do
     Repo.get_by(User, provider: provider, provider_id: provider_id)
+  end
+
+  @doc """
+  Finds a local user by username. Returns nil if not found.
+  """
+  def get_user_by_username(username) when is_binary(username) do
+    Repo.get_by(User, username: username, provider: "local")
+  end
+
+  # ---------------------------------------------------------------------------
+  # Local auth
+  # ---------------------------------------------------------------------------
+
+  @doc """
+  Creates a local user with a username and plain-text password.
+  The password is hashed before storage. Bootstraps a graph on success.
+  """
+  @spec create_local_user(String.t(), String.t()) ::
+          {:ok, User.t()} | {:error, Ecto.Changeset.t()}
+  def create_local_user(username, password) do
+    attrs = %{username: username, name: username, password: password}
+
+    with {:ok, user} <-
+           %User{}
+           |> User.local_changeset(attrs)
+           |> Repo.insert() do
+      case Graphs.bootstrap_for_user(user) do
+        {:ok, _} ->
+          {:ok, user}
+
+        {:error, step, changeset, _} ->
+          Logger.error(
+            "[Accounts] Failed to bootstrap graph for local user #{user.id} at step #{step}: #{inspect(changeset)}"
+          )
+          {:ok, user}
+      end
+    end
+  end
+
+  @doc """
+  Authenticates a local user by username and plain-text password.
+  Returns `{:ok, user}` on success, `{:error, :invalid_credentials}` otherwise.
+  """
+  @spec authenticate_local_user(String.t(), String.t()) ::
+          {:ok, User.t()} | {:error, :invalid_credentials}
+  def authenticate_local_user(username, password)
+      when is_binary(username) and is_binary(password) do
+    user = get_user_by_username(username)
+
+    if user && Bcrypt.verify_pass(password, user.password_hash) do
+      {:ok, user}
+    else
+      # Run a dummy check to avoid timing attacks even when user is nil.
+      Bcrypt.no_user_verify()
+      {:error, :invalid_credentials}
+    end
   end
 
   # ---------------------------------------------------------------------------

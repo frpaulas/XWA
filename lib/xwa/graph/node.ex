@@ -32,6 +32,7 @@ defmodule Xwa.Graph.Node do
 
   @source_types ~w(aspirational operational external)
   @corpus_layers ~w(self_description internal_record external_context)
+  @node_types ~w(claim synthesis concept)
 
   defstruct [
     # Identity
@@ -75,7 +76,16 @@ defmodule Xwa.Graph.Node do
     #             "private" = only visible to created_by user;
     #             "shared"  = visible to members listed in shared_with (all if empty)
     graph_id: nil,
-    visibility: "system"
+    visibility: "system",
+    # Structural node type — "claim" (default), "synthesis", or "concept".
+    # Synthesis nodes aggregate near-duplicate cross-graph claims; their
+    # constituent source nodes are tracked via `contributes_to` edges AND
+    # stored as parallel lists in Memgraph (constituent_node_ids /
+    # constituent_graph_ids), which are surfaced here as `constituents`.
+    node_type: "claim",
+    # List of %{node_id: uuid, graph_id: uuid} maps — populated only for
+    # synthesis nodes. Stored in Memgraph as parallel string lists.
+    constituents: []
   ]
 
   @type t :: %__MODULE__{
@@ -102,7 +112,9 @@ defmodule Xwa.Graph.Node do
           shared_with: [String.t()],
           notes: String.t() | nil,
           graph_id: String.t() | nil,
-          visibility: String.t()
+          visibility: String.t(),
+          node_type: String.t(),
+          constituents: [map()]
         }
 
   @doc """
@@ -138,7 +150,9 @@ defmodule Xwa.Graph.Node do
       shared_with: Map.get(attrs, :shared_with, []),
       notes: Map.get(attrs, :notes),
       graph_id: Map.get(attrs, :graph_id),
-      visibility: Map.get(attrs, :visibility, "system")
+      visibility: Map.get(attrs, :visibility, "system"),
+      node_type: Map.get(attrs, :node_type, "claim"),
+      constituents: Map.get(attrs, :constituents, [])
     }
 
     case validate(node) do
@@ -188,10 +202,20 @@ defmodule Xwa.Graph.Node do
   """
   @spec to_params(t()) :: map()
   def to_params(%__MODULE__{} = node) do
-    node
-    |> Map.from_struct()
-    |> Enum.reject(fn {_k, v} -> is_nil(v) end)
-    |> Enum.into(%{})
+    {constituents, rest} = node |> Map.from_struct() |> Map.pop(:constituents, [])
+
+    base =
+      rest
+      |> Enum.reject(fn {_k, v} -> is_nil(v) end)
+      |> Enum.into(%{})
+
+    if constituents == [] do
+      base
+    else
+      base
+      |> Map.put(:constituent_node_ids, Enum.map(constituents, & &1.node_id))
+      |> Map.put(:constituent_graph_ids, Enum.map(constituents, & &1.graph_id))
+    end
   end
 
   # ---------------------------------------------------------------------------
@@ -223,17 +247,40 @@ defmodule Xwa.Graph.Node do
       shared_with: props["shared_with"] || [],
       notes: props["notes"],
       graph_id: props["graph_id"],
-      visibility: Map.get(props, "visibility", "system")
+      visibility: Map.get(props, "visibility", "system"),
+      node_type: props["node_type"] || "claim",
+      constituents: zip_constituents(props["constituent_node_ids"], props["constituent_graph_ids"])
     }
+  end
+
+  defp zip_constituents(nil, _), do: []
+  defp zip_constituents([], _), do: []
+
+  defp zip_constituents(node_ids, graph_ids) when is_list(node_ids) do
+    graph_ids = graph_ids || []
+
+    node_ids
+    |> Enum.with_index()
+    |> Enum.map(fn {node_id, i} ->
+      %{node_id: node_id, graph_id: Enum.at(graph_ids, i)}
+    end)
   end
 
   defp validate(%__MODULE__{} = node) do
     []
     |> require(:content, node.content)
     |> require(:summary, node.summary)
-    |> require(:source_document_id, node.source_document_id)
+    |> then(fn errors ->
+      # Synthesis nodes have no source document — they aggregate cross-graph claims
+      if node.node_type == "synthesis" do
+        errors
+      else
+        require(errors, :source_document_id, node.source_document_id)
+      end
+    end)
     |> validate_inclusion(:source_type, node.source_type, @source_types, allow_nil: true)
     |> validate_inclusion(:corpus_layer, node.corpus_layer, @corpus_layers, allow_nil: true)
+    |> validate_inclusion(:node_type, node.node_type, @node_types, allow_nil: false)
     |> validate_confidence(node.confidence)
   end
 

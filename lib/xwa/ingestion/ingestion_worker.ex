@@ -11,7 +11,8 @@ defmodule Xwa.Ingestion.IngestionWorker do
      b. Fetch semantically relevant existing nodes
      c. Extract edges via EdgeExtractor (Claude API) — logs ExtractionRun
      d. Insert edges into Memgraph
-  5. Advance document ingestion_status to "complete" (or "failed")
+  5. Embed all new nodes in batch via Voyage AI — logs ExtractionRun
+  6. Advance document ingestion_status to "complete" (or "failed")
 
   ## Usage
 
@@ -28,7 +29,7 @@ defmodule Xwa.Ingestion.IngestionWorker do
 
   alias Xwa.Documents
   alias Xwa.Graph.{Nodes, Edges}
-  alias Xwa.Ingestion.{ClaimExtractor, EdgeExtractor, ExtractionRuns}
+  alias Xwa.Ingestion.{ClaimExtractor, EdgeExtractor, ExtractionRuns, VoyageEmbedder}
 
   @neighbourhood_size 20
   @prompt_version "v1"
@@ -50,7 +51,8 @@ defmodule Xwa.Ingestion.IngestionWorker do
            :ok <- advance_status(doc, "processing"),
            {:ok, nodes} <- extract_claims(doc, text, requesting_user_id, graph_id),
            :ok <- insert_nodes_and_edges(nodes, doc, requesting_user_id, graph_id),
-           :ok <- insert_wiki_links(text, nodes, doc, requesting_user_id, graph_id) do
+           :ok <- insert_wiki_links(text, nodes, doc, requesting_user_id, graph_id),
+           :ok <- embed_nodes(nodes, doc, graph_id) do
         :ok
       end
 
@@ -323,6 +325,67 @@ defmodule Xwa.Ingestion.IngestionWorker do
   end
 
   # ---------------------------------------------------------------------------
+  # Embedding
+  # ---------------------------------------------------------------------------
+
+  defp embed_nodes(nodes, doc, graph_id) do
+    pairs = Enum.map(nodes, fn n -> {n.id, n.summary || n.content} end)
+    t0 = System.monotonic_time(:millisecond)
+
+    case VoyageEmbedder.embed_keyed(pairs) do
+      {:ok, keyed_embeddings, usage} ->
+        duration_ms = System.monotonic_time(:millisecond) - t0
+
+        Enum.each(keyed_embeddings, fn {id, embedding} ->
+          case Nodes.set_embedding(id, embedding) do
+            :ok -> :ok
+            {:error, reason} ->
+              Logger.warning("[Ingestion] Failed to store embedding for node #{id}: #{inspect(reason)}")
+          end
+        end)
+
+        log_run(%{
+          run_type: "embedding",
+          document_id: doc.id,
+          graph_id: graph_id,
+          status: "ok",
+          nodes_extracted: length(keyed_embeddings),
+          duration_ms: duration_ms,
+          usage: %{
+            model: usage.model,
+            input_tokens: usage.total_tokens,
+            output_tokens: 0,
+            cost_usd_override: usage.cost_usd
+          }
+        })
+
+        Logger.info("[Ingestion] Embedded #{length(keyed_embeddings)} nodes for document #{doc.id}")
+        :ok
+
+      {:error, :voyage_api_key_not_configured} ->
+        Logger.info("[Ingestion] Voyage API key not configured — skipping embedding for document #{doc.id}")
+        :ok
+
+      {:error, reason} ->
+        duration_ms = System.monotonic_time(:millisecond) - t0
+
+        log_run(%{
+          run_type: "embedding",
+          document_id: doc.id,
+          graph_id: graph_id,
+          status: "error",
+          duration_ms: duration_ms,
+          error_message: inspect(reason),
+          usage: %{}
+        })
+
+        Logger.warning("[Ingestion] Embedding failed for document #{doc.id}: #{inspect(reason)}")
+        # Non-fatal — embeddings can be backfilled later
+        :ok
+    end
+  end
+
+  # ---------------------------------------------------------------------------
   # ExtractionRun logging
   # ---------------------------------------------------------------------------
 
@@ -339,7 +402,7 @@ defmodule Xwa.Ingestion.IngestionWorker do
       edges_extracted: Map.get(attrs, :edges_extracted),
       input_tokens: Map.get(usage, :input_tokens),
       output_tokens: Map.get(usage, :output_tokens),
-      cost_usd: compute_cost(run_type, usage),
+      cost_usd: Map.get(usage, :cost_usd_override) || compute_cost(run_type, usage),
       latency_ms: Map.get(usage, :latency_ms),
       duration_ms: Map.get(attrs, :duration_ms),
       finish_reason: Map.get(usage, :finish_reason),
