@@ -16,6 +16,7 @@ defmodule XwaWeb.GraphLive do
       |> assign(:filter_layer, "all")
       |> assign(:filter_type, "all")
       |> assign(:filter_min_degree, 2)
+      |> assign(:hide_isolated, true)
       |> assign(:search, "")
       |> assign(:nodes, [])
       |> assign(:all_edges, [])
@@ -33,6 +34,7 @@ defmodule XwaWeb.GraphLive do
       |> assign(:explore_slider, 50)
       |> assign(:explore_loading, false)
       |> assign(:doc_modal, nil)
+      |> assign_new(:read_only, fn -> false end)
 
     {:ok, socket}
   end
@@ -349,6 +351,9 @@ defmodule XwaWeb.GraphLive do
     {:noreply, push_canvas_events(socket)}
   end
 
+  def handle_event("start_connect", _params, %{assigns: %{read_only: true}} = socket),
+    do: {:noreply, socket}
+
   def handle_event("start_connect", _params, socket) do
     {:noreply, assign(socket, connect_from: socket.assigns.selected_node.id)}
   end
@@ -357,6 +362,9 @@ defmodule XwaWeb.GraphLive do
     {:noreply, assign(socket, connect_from: nil, new_edge_modal: nil)}
   end
 
+  def handle_event("confirm_delete_edge", _params, %{assigns: %{read_only: true}} = socket),
+    do: {:noreply, socket}
+
   def handle_event("confirm_delete_edge", %{"id" => edge_id}, socket) do
     {:noreply, assign(socket, confirm_delete_edge: edge_id)}
   end
@@ -364,6 +372,9 @@ defmodule XwaWeb.GraphLive do
   def handle_event("cancel_delete_edge", _params, socket) do
     {:noreply, assign(socket, confirm_delete_edge: nil)}
   end
+
+  def handle_event("delete_edge", _params, %{assigns: %{read_only: true}} = socket),
+    do: {:noreply, socket}
 
   def handle_event("delete_edge", %{"id" => edge_id}, socket) do
     user_id = socket.assigns.current_scope.user.id
@@ -411,6 +422,9 @@ defmodule XwaWeb.GraphLive do
       {:noreply, assign(socket, new_edge_modal: modal, connect_from: nil)}
     end
   end
+
+  def handle_event("create_edge", _params, %{assigns: %{read_only: true}} = socket),
+    do: {:noreply, socket}
 
   def handle_event("create_edge", params, socket) do
     user_id = socket.assigns.current_scope.user.id
@@ -467,6 +481,16 @@ defmodule XwaWeb.GraphLive do
     socket = apply_filters(socket, socket.assigns.filter_layer, socket.assigns.filter_type, socket.assigns.search, min_degree, true)
     {:noreply, socket}
   end
+
+  def handle_event("toggle_isolated", _params, socket) do
+    hide = !socket.assigns.hide_isolated
+    socket =
+      socket
+      |> assign(:hide_isolated, hide)
+      |> push_event("toggle_isolated", %{hide: hide})
+    {:noreply, socket}
+  end
+
 
   # Called by the JS hook when the user loads a named saved view.
   # Restores filter state; the hook applies saved node positions on the resulting graph_loaded event.
@@ -602,12 +626,13 @@ defmodule XwaWeb.GraphLive do
 
   # Compute the minimum degree threshold that yields 250–350 visible nodes.
   # Tries thresholds 1..20 and picks the lowest that keeps node count <= 350.
-  # If the full graph has <= 250 nodes, returns 0 (show orphans too).
-  # If even threshold=20 gives >350, returns 20 (keep pruning).
+  # Computes an initial degree threshold that targets a readable graph size.
+  # Target: show roughly 1/3 of nodes, clamped to 30–120 visible.
+  # Always returns at least 2 so degree-1 noise is filtered on every load.
   defp auto_threshold(nodes, edges) do
     total = length(nodes)
-    if total <= 250 do
-      0
+    if total == 0 do
+      1
     else
       edge_counts =
         Enum.reduce(edges, %{}, fn e, acc ->
@@ -616,9 +641,11 @@ defmodule XwaWeb.GraphLive do
           |> Map.update(e.to_node_id, 1, &(&1 + 1))
         end)
 
-      Enum.find(1..20, 20, fn threshold ->
+      target = total |> div(3) |> max(30) |> min(120)
+
+      Enum.find(2..20, 20, fn threshold ->
         count = Enum.count(nodes, fn n -> Map.get(edge_counts, n.id, 0) >= threshold end)
-        count <= 350
+        count <= target
       end)
     end
   end
@@ -775,6 +802,23 @@ defmodule XwaWeb.GraphLive do
                 name="q"
                 class="w-full rounded-lg border border-base-300 bg-base-200/50 pl-8 pr-3 py-2 text-xs text-base-content placeholder:text-base-content/35 focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary transition-colors"
               />
+            </div>
+
+            <%!-- Dimension-0 (isolated) node toggle --%>
+            <div class="mb-4 flex items-center justify-between">
+              <p class="text-xs font-medium text-base-content/50">Isolated nodes</p>
+              <button
+                phx-click="toggle_isolated"
+                class={[
+                  "px-2.5 py-1 rounded-lg text-xs font-medium transition-colors",
+                  if(@hide_isolated,
+                    do: "bg-base-200 text-base-content/40 hover:bg-base-300",
+                    else: "bg-primary/10 text-primary hover:bg-primary/20"
+                  )
+                ]}
+              >
+                <%= if @hide_isolated, do: "Hidden", else: "Shown" %>
+              </button>
             </div>
 
             <%!-- Min connections slider --%>
@@ -1009,6 +1053,7 @@ defmodule XwaWeb.GraphLive do
             data-graph-id={@current_scope.graph_id}
             data-neighborhood={Jason.encode!(@neighborhood)}
             data-focus={Jason.encode!(@focus_neighborhoods)}
+            data-read-only={to_string(@read_only)}
             class={[if(@connect_from, do: "cursor-crosshair", else: "")]}
             style="position:absolute;top:0;right:0;bottom:0;left:0;"
           >
@@ -1030,31 +1075,35 @@ defmodule XwaWeb.GraphLive do
               </button>
             </div>
           <% end %>
-          <%!-- Save view dialog (shown by JS when user clicks Save view) --%>
-          <div
-            id="cy-save-view-dialog"
-            style="display:none"
-            class="absolute bottom-14 right-3 z-30 w-72 rounded-xl border border-base-300 bg-base-100 p-3 shadow-xl"
-          >
-            <p class="mb-2 text-xs font-medium text-base-content">Name this view</p>
-            <input
-              id="cy-save-view-name"
-              type="text"
-              class="mb-2 w-full rounded-lg border border-base-300 bg-base-200/50 px-2.5 py-1.5 text-xs focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary"
-              placeholder="View name…"
-            />
-            <div class="flex justify-end gap-1.5">
-              <button id="cy-save-view-cancel" class="rounded-lg px-2.5 py-1 text-xs text-base-content/50 hover:bg-base-200 transition-colors">Cancel</button>
-              <button id="cy-save-view-confirm" class="rounded-lg bg-primary px-2.5 py-1 text-xs font-medium text-primary-content hover:brightness-110 transition-all">Save</button>
+          <%!-- Save view dialog: hidden for read-only visitors --%>
+          <%= if !@read_only do %>
+            <div
+              id="cy-save-view-dialog"
+              style="display:none"
+              class="absolute bottom-14 right-3 z-30 w-72 rounded-xl border border-base-300 bg-base-100 p-3 shadow-xl"
+            >
+              <p class="mb-2 text-xs font-medium text-base-content">Name this view</p>
+              <input
+                id="cy-save-view-name"
+                type="text"
+                class="mb-2 w-full rounded-lg border border-base-300 bg-base-200/50 px-2.5 py-1.5 text-xs focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary"
+                placeholder="View name…"
+              />
+              <div class="flex justify-end gap-1.5">
+                <button id="cy-save-view-cancel" class="rounded-lg px-2.5 py-1 text-xs text-base-content/50 hover:bg-base-200 transition-colors">Cancel</button>
+                <button id="cy-save-view-confirm" class="rounded-lg bg-primary px-2.5 py-1 text-xs font-medium text-primary-content hover:brightness-110 transition-all">Save</button>
+              </div>
             </div>
-          </div>
+          <% end %>
           <div class="absolute bottom-3 right-3 flex items-center gap-1.5">
-            <button
-              id="cy-save-view-btn"
-              onclick="document.getElementById('cy').dispatchEvent(new CustomEvent('show-save-view-dialog'))"
-              class="rounded-lg bg-base-100/90 border border-base-200 px-2.5 py-1 text-xs text-base-content/50 backdrop-blur-sm hover:text-base-content hover:border-base-300 transition-colors"
-              title="Save current view (layout + filters)"
-            >Save view</button>
+            <%= if !@read_only do %>
+              <button
+                id="cy-save-view-btn"
+                onclick="document.getElementById('cy').dispatchEvent(new CustomEvent('show-save-view-dialog'))"
+                class="rounded-lg bg-base-100/90 border border-base-200 px-2.5 py-1 text-xs text-base-content/50 backdrop-blur-sm hover:text-base-content hover:border-base-300 transition-colors"
+                title="Save current view (layout + filters)"
+              >Save view</button>
+            <% end %>
             <button
               onclick="document.getElementById('cy').dispatchEvent(new CustomEvent('reset-layout'))"
               class="rounded-lg bg-base-100/90 border border-base-200 px-2.5 py-1 text-xs text-base-content/50 backdrop-blur-sm hover:text-base-content hover:border-base-300 transition-colors"
@@ -1217,6 +1266,7 @@ defmodule XwaWeb.GraphLive do
                             </div>
                             <p class="text-xs text-base-content/70 break-words">{edge.other_label}</p>
                           </div>
+                          <%= if !@read_only do %>
                           <div class="shrink-0">
                             <%= if @confirm_delete_edge == edge.id do %>
                               <div class="flex items-center gap-1">
@@ -1245,6 +1295,7 @@ defmodule XwaWeb.GraphLive do
                               </button>
                             <% end %>
                           </div>
+                          <% end %>
                         </div>
                       </div>
                     <% end %>
@@ -1252,15 +1303,17 @@ defmodule XwaWeb.GraphLive do
                 </div>
               <% end %>
 
-              <%!-- Connect action --%>
-              <div class="pt-2 border-t border-base-200">
-                <button
-                  phx-click="start_connect"
-                  class="w-full inline-flex items-center justify-center gap-2 rounded-lg border border-base-300 px-3 py-2 text-xs font-medium text-base-content/60 hover:bg-base-200 hover:text-base-content transition-colors"
-                >
-                  <.icon name="hero-link" class="w-3.5 h-3.5" /> Connect to another node
-                </button>
-              </div>
+              <%!-- Connect action — hidden for read-only visitors --%>
+              <%= if !@read_only do %>
+                <div class="pt-2 border-t border-base-200">
+                  <button
+                    phx-click="start_connect"
+                    class="w-full inline-flex items-center justify-center gap-2 rounded-lg border border-base-300 px-3 py-2 text-xs font-medium text-base-content/60 hover:bg-base-200 hover:text-base-content transition-colors"
+                  >
+                    <.icon name="hero-link" class="w-3.5 h-3.5" /> Connect to another node
+                  </button>
+                </div>
+              <% end %>
             </div>
           <% else %>
             <%!-- Empty state --%>

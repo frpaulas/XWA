@@ -126,11 +126,14 @@ const SigmaGraph = {
     this._dragStartPos = null          // {x, y} viewport coords at mousedown
     this._currentLayer = "all"         // last applied layer filter (for saving views)
     this._currentType  = "all"         // last applied type filter
+    this._hideIsolated = true          // hide dimension-0 nodes (degree === 0) by default
     this._pendingViewId = null         // save ID being loaded — positions applied in graph_loaded handler
     this._skipLayout = false           // set when saved-view positions are pre-loaded; skips FA2/auto-save
     this._pendingOverlayRestore = null // overlay state to restore after layout (from a saved view)
     this._mouseX = 0                   // cursor position relative to this.el, updated on mousemove
     this._mouseY = 0
+    this._selectedEdge = null          // currently clicked edge
+    this._edgeHighlightedNodes = new Set() // endpoints of _selectedEdge
 
     // Track cursor position for tooltip anchoring.
     this._onMouseMove = (e) => {
@@ -158,6 +161,8 @@ const SigmaGraph = {
       this._pendingNeighborhood = null
       this._pendingFocus = null
       this._exploredNodes = []
+      this._selectedEdge = null
+      this._edgeHighlightedNodes = new Set()
       this._minDegree = data.min_degree || 1
       this._currentLayer = data.layer  || "all"
       this._currentType  = data.type   || "all"
@@ -234,6 +239,13 @@ const SigmaGraph = {
       }
     })
 
+    this.handleEvent("toggle_isolated", ({hide}) => {
+      this._hideIsolated = hide
+      this._applyDegreeFilter()
+      this.sigma && this.sigma.refresh()
+      this._updateStats && this._updateStats()
+    })
+
     // Capture graph_id from the DOM attribute (set at mount time, stable across reloads).
     this._graphId = this.el.dataset.graphId || null
 
@@ -254,8 +266,12 @@ const SigmaGraph = {
 
   destroyed() {
     if (this._resizeObserver) this._resizeObserver.disconnect()
-    if (this._onDocMouseUp) document.removeEventListener("mouseup", this._onDocMouseUp)
-    if (this._onMouseMove) this.el.removeEventListener("mousemove", this._onMouseMove)
+    if (this._onDocMouseUp)  document.removeEventListener("mouseup",    this._onDocMouseUp)
+    if (this._onMouseMove)   this.el.removeEventListener("mousemove",   this._onMouseMove)
+    if (this._onBoxKeyDown)  document.removeEventListener("keydown",    this._onBoxKeyDown)
+    if (this._onBoxKeyUp)    document.removeEventListener("keyup",      this._onBoxKeyUp)
+    if (this._onBoxMove)     document.removeEventListener("mousemove",  this._onBoxMove)
+    if (this._onBoxUp)       document.removeEventListener("mouseup",    this._onBoxUp)
     this._destroySigma()
   },
 
@@ -428,17 +444,18 @@ const SigmaGraph = {
   _applyDegreeFilter() {
     this._hiddenNodes = new Set()
     this._hiddenEdges = new Set()
-    if (this._minDegree > 1) {
-      const min = this._minDegree
-      this.graph.forEachNode((id) => {
-        if (this.graph.degree(id) < min) this._hiddenNodes.add(id)
-      })
-      this.graph.forEachEdge((id, _attrs, source, target) => {
-        if (this._hiddenNodes.has(source) || this._hiddenNodes.has(target)) {
-          this._hiddenEdges.add(id)
-        }
-      })
-    }
+    const min = this._minDegree
+    this.graph.forEachNode((id) => {
+      const deg = this.graph.degree(id)
+      if ((min > 1 && deg < min) || (this._hideIsolated && deg === 0)) {
+        this._hiddenNodes.add(id)
+      }
+    })
+    this.graph.forEachEdge((id, _attrs, source, target) => {
+      if (this._hiddenNodes.has(source) || this._hiddenNodes.has(target)) {
+        this._hiddenEdges.add(id)
+      }
+    })
     // Color nodes based on visible connectivity; mark isolated for ring placement.
     // Sphere nodes change color only (no type switch); dark-red tints the sphere texture.
     this.graph.forEachNode((id) => {
@@ -634,14 +651,24 @@ const SigmaGraph = {
       renderEdgeLabels: false,
       defaultEdgeType: "arrow",
       zIndex: true,   // respect zIndex returned by reducers
+      enableEdgeClickEvents: true,
+      enableEdgeHoverEvents: true,  // needed for click detection to work reliably
       nodeProgramClasses: { piechart: NodePiechartProgram, sphere: NodeSphereProgram },
       nodeReducer: (id, attrs) => this._nodeReducer(id, attrs, colors),
       edgeReducer: (id, attrs) => this._edgeReducer(id, attrs, colors),
     })
 
+    this._initBoxSelect()
+
     // Events
+    this.sigma.on("clickEdge", ({edge}) => {
+      if (this._didDrag) return
+      this._activateEdge(edge)
+    })
+
     this.sigma.on("clickNode", ({node}) => {
       if (this._didDrag) { this._didDrag = false; return }  // consumed: drag just ended
+      this._dismissEdgeSelection()
       const currentCenter = this._exploredNodes[this._exploredNodes.length - 1]
       const prevIdx = this._exploredNodes.indexOf(node)
       if (prevIdx !== -1 && node !== currentCenter) {
@@ -652,10 +679,16 @@ const SigmaGraph = {
     })
 
     this.sigma.on("clickStage", () => {
+      if (this._selectedEdge) { this._dismissEdgeSelection(); return }
+      // Manual fallback: check if click landed near an edge (Sigma's built-in
+      // edge picking can miss thin edges in some versions/programs)
+      const edgeId = this._findEdgeAtPoint(this._mouseX, this._mouseY)
+      if (edgeId) { this._activateEdge(edgeId); return }
       this.pushEvent("deselect", {})
     })
 
     this.sigma.on("enterNode", ({node}) => {
+      if (this._selectedEdge) return  // edge popup has priority
       this._highlightedNode = node
       this._hoveredNeighbors = new Set(this.graph.neighbors(node))
       this._hoveredEdges = new Set()
@@ -682,6 +715,7 @@ const SigmaGraph = {
     })
 
     this.sigma.on("leaveNode", () => {
+      if (this._selectedEdge) return  // edge popup stays until explicit dismiss
       this._highlightedNode = null
       this._hoveredNeighbors = new Set()
       this._hoveredEdges = new Set()
@@ -776,7 +810,6 @@ const SigmaGraph = {
       iterations,
       settings: { ...fa2Settings, scalingRatio: fa2Settings.scalingRatio * 1.2 },
     })
-    this._persistAutoSave()  // snapshot FA2 result so filter changes don't scramble it
     this._onLayoutDone()
   },
 
@@ -908,6 +941,7 @@ const SigmaGraph = {
     const list  = document.getElementById("cy-saves-list")
     const count = document.getElementById("cy-saves-count")
     if (!list) return
+    const readOnly = this.el.dataset.readOnly === "true"
     const saves = this._listSaves()
     if (count) count.textContent = `${saves.length} of 20`
     if (saves.length === 0) {
@@ -917,15 +951,17 @@ const SigmaGraph = {
     list.innerHTML = saves.map(s => {
       const date = new Date(s.savedAt).toLocaleDateString(undefined, { month: "short", day: "numeric" })
       const name = escHtml(s.name)
+      const deleteBtn = readOnly ? "" : `
+          <button data-delete-view="${s.id}"
+            class="opacity-0 group-hover/item:opacity-100 text-error hover:bg-error/10 rounded px-1.5 py-1 text-sm leading-none transition-all shrink-0"
+            title="Delete">×</button>`
       return `
         <div class="flex items-center gap-1 group/item rounded hover:bg-base-200 transition-colors">
           <button data-load-view="${s.id}"
             class="flex-1 min-w-0 text-left text-xs truncate px-2 py-1.5"
             title="${name}">${name}</button>
           <span class="text-xs text-base-content/30 shrink-0 pr-1 tabular-nums">${date}</span>
-          <button data-delete-view="${s.id}"
-            class="opacity-0 group-hover/item:opacity-100 text-error hover:bg-error/10 rounded px-1.5 py-1 text-sm leading-none transition-all shrink-0"
-            title="Delete">×</button>
+          ${deleteBtn}
         </div>`
     }).join("")
   },
@@ -983,6 +1019,57 @@ const SigmaGraph = {
     el.textContent = msg
     document.body.appendChild(el)
     setTimeout(() => { el.style.opacity = "0"; setTimeout(() => el.remove(), 300) }, 2200)
+  },
+
+  // Post-FA2 overlap removal. FA2 works in abstract graph-space coordinates while Sigma
+  // renders nodes at screen-pixel sizes — adjustSizes can't bridge this gap because the
+  // two coordinate systems are unrelated. Instead, after FA2 we compute the graph→screen
+  // scale factor from the bounding box, convert each node's pixel radius into graph-space
+  // units, and run an iterative spring-push until no two nodes visually overlap.
+  _removeOverlaps() {
+    if (!this.graph || this.graph.order < 2) return
+
+    // Use the live camera to get the true graph→screen scale.
+    // graphToViewport maps a graph-space point to a CSS-pixel viewport point.
+    // Comparing two points 1 unit apart gives us px-per-graph-unit.
+    const p0 = this.sigma.graphToViewport({ x: 0, y: 0 })
+    const p1 = this.sigma.graphToViewport({ x: 1, y: 0 })
+    const pxPerUnit = Math.max(Math.abs(p1.x - p0.x), 0.001)
+    const graphUnitsPerPx = 1 / pxPerUnit
+
+    const nodes = []
+    this.graph.forEachNode((id, attrs) => {
+      if (this._hiddenNodes.has(id)) return  // skip degree-filtered nodes
+      // +5 px gap so adjacent nodes have a comfortable visual margin
+      nodes.push({ id, x: attrs.x, y: attrs.y, r: ((attrs._size || 8) + 5) * graphUnitsPerPx })
+    })
+
+    for (let pass = 0; pass < 80; pass++) {
+      let moved = false
+      for (let i = 0; i < nodes.length; i++) {
+        for (let j = i + 1; j < nodes.length; j++) {
+          const a = nodes[i], b = nodes[j]
+          const dx = b.x - a.x || 0.001
+          const dy = b.y - a.y
+          const dist = Math.sqrt(dx * dx + dy * dy) || 0.001
+          const minDist = a.r + b.r
+          if (dist < minDist) {
+            moved = true
+            // 1.05 overshoot helps dense clusters converge in fewer outer passes
+            const push = ((minDist - dist) / 2) * 1.05
+            const nx = dx / dist, ny = dy / dist
+            a.x -= nx * push; a.y -= ny * push
+            b.x += nx * push; b.y += ny * push
+          }
+        }
+      }
+      if (!moved) break
+    }
+
+    nodes.forEach(({ id, x, y }) => {
+      this.graph.setNodeAttribute(id, "x", x)
+      this.graph.setNodeAttribute(id, "y", y)
+    })
   },
 
   // Place visually-isolated nodes (type:"isolated", set by _applyDegreeFilter) on a
@@ -1087,6 +1174,101 @@ const SigmaGraph = {
     }
   },
 
+  // ---------------------------------------------------------------------------
+  // Box-select zoom — Alt+drag to draw a rubber-band rectangle, release to zoom
+  // ---------------------------------------------------------------------------
+  _initBoxSelect() {
+    // Overlay div sits on top of the Sigma canvas; transparent to mouse normally.
+    const overlay = document.createElement("div")
+    overlay.style.cssText = "position:absolute;inset:0;pointer-events:none;cursor:crosshair;z-index:10;"
+    const band = document.createElement("div")
+    band.style.cssText = "position:absolute;border:2px dashed rgba(255,255,255,0.85);background:rgba(255,255,255,0.07);display:none;pointer-events:none;box-sizing:border-box;"
+    overlay.appendChild(band)
+    this.el.appendChild(overlay)
+    this._boxOverlay = overlay
+    this._boxBand    = band
+    this._boxStart   = null
+    this._boxActive  = false
+
+    // Enable/disable overlay on Alt key.
+    this._onBoxKeyDown = (e) => {
+      if (e.key === "Alt" && !this._boxActive) overlay.style.pointerEvents = "all"
+    }
+    this._onBoxKeyUp = (e) => {
+      if (e.key === "Alt" && !this._boxActive) overlay.style.pointerEvents = "none"
+    }
+    document.addEventListener("keydown", this._onBoxKeyDown)
+    document.addEventListener("keyup",   this._onBoxKeyUp)
+
+    // Mousedown: begin selection.
+    overlay.addEventListener("mousedown", (e) => {
+      if (!e.altKey) { overlay.style.pointerEvents = "none"; return }
+      e.preventDefault()
+      this._boxActive = true
+      const r = this.el.getBoundingClientRect()
+      this._boxStart = { x: e.clientX - r.left, y: e.clientY - r.top }
+      band.style.cssText = band.style.cssText.replace("display:none", "display:block")
+      band.style.display = "block"
+      band.style.left = this._boxStart.x + "px"
+      band.style.top  = this._boxStart.y + "px"
+      band.style.width = "0px"
+      band.style.height = "0px"
+    })
+
+    // Mousemove: update rectangle (document-level so dragging outside el works).
+    this._onBoxMove = (e) => {
+      if (!this._boxActive || !this._boxStart) return
+      const r = this.el.getBoundingClientRect()
+      const cx = e.clientX - r.left
+      const cy = e.clientY - r.top
+      band.style.left   = Math.min(this._boxStart.x, cx) + "px"
+      band.style.top    = Math.min(this._boxStart.y, cy) + "px"
+      band.style.width  = Math.abs(cx - this._boxStart.x) + "px"
+      band.style.height = Math.abs(cy - this._boxStart.y) + "px"
+    }
+    document.addEventListener("mousemove", this._onBoxMove)
+
+    // Mouseup: zoom to selection.
+    this._onBoxUp = (e) => {
+      if (!this._boxActive || !this._boxStart) return
+      this._boxActive = false
+      band.style.display = "none"
+      overlay.style.pointerEvents = "none"
+      const r = this.el.getBoundingClientRect()
+      const cx = e.clientX - r.left
+      const cy = e.clientY - r.top
+      const x0 = Math.min(this._boxStart.x, cx)
+      const y0 = Math.min(this._boxStart.y, cy)
+      const x1 = Math.max(this._boxStart.x, cx)
+      const y1 = Math.max(this._boxStart.y, cy)
+      this._boxStart = null
+      if (x1 - x0 < 8 || y1 - y0 < 8) return  // misclick — ignore tiny selections
+      // sigma.viewportToGraph() returns raw graph coords, but camera.animate() needs
+      // framed/normalized coords (the space camera.x/y live in).  Compute directly from
+      // the current camera state instead.
+      const cam   = this.sigma.getCamera()
+      const cs    = cam.getState()                          // {x, y, ratio}
+      const cw    = this._container.offsetWidth  || 800
+      const ch    = this._container.offsetHeight || 600
+      const scale = Math.min(cw, ch)                        // Sigma's reference dimension (NOT /2)
+      // Invert the camera projection: viewport px → framed graph coords.
+      // Sigma's framed Y axis is inverted relative to screen Y (positive Y = up in graph).
+      const toFramed = (vx, vy) => ({
+        x: cs.x + (vx - cw / 2) * cs.ratio / scale,
+        y: cs.y - (vy - ch / 2) * cs.ratio / scale,
+      })
+      // Center: convert the selection's midpoint to framed coords.
+      const fc    = toFramed((x0 + x1) / 2, (y0 + y1) / 2)
+      // Ratio: the selection covers (selW/cw) of viewport width and (selH/ch) of height.
+      // New ratio = current ratio × that fraction, so the selection fills the canvas.
+      const selW  = x1 - x0
+      const selH  = y1 - y0
+      const ratio = cs.ratio * Math.max(selW / cw, selH / ch) * 1.05
+      cam.animate({ x: fc.x, y: fc.y, ratio }, { duration: 250 })
+    }
+    document.addEventListener("mouseup", this._onBoxUp)
+  },
+
   _onLayoutDone(skipPlacement = false) {
     this._layoutDone = true
     this._applyDegreeFilter()
@@ -1101,6 +1283,7 @@ const SigmaGraph = {
     this.sigma.refresh()
     this._updateStats()
     // Defer fit: getNodeDisplayData is only populated after Sigma's first render pass.
+    // Overlap removal also runs here so it can use the real camera scale.
     setTimeout(() => {
       if (this._pendingOverlayRestore) {
         const os = this._pendingOverlayRestore
@@ -1109,6 +1292,12 @@ const SigmaGraph = {
       } else {
         this._fitView()
         this._applyPendingOverlay()
+      }
+      if (!skipPlacement) {
+        this._removeOverlaps()
+        this.sigma.refresh()
+        this._fitView()           // re-fit after nodes spread out
+        this._persistAutoSave()
       }
     }, 50)
   },
@@ -1127,6 +1316,71 @@ const SigmaGraph = {
     el.textContent = (shownN === totalN && shownE === totalE)
       ? `${totalN} nodes · ${totalE} edges`
       : `${shownN} of ${totalN} nodes · ${shownE} of ${totalE} edges`
+  },
+
+  _activateEdge(edge) {
+    this._selectedEdge = edge
+    const source = this.graph.source(edge)
+    const target = this.graph.target(edge)
+    this._edgeHighlightedNodes = new Set([source, target])
+    this._highlightedNode = null
+    this._hoveredNeighbors = new Set()
+    this._hoveredEdges = new Set()
+
+    const a = this.graph.getEdgeAttributes(edge)
+    const srcLabel = this.graph.getNodeAttribute(source, "label") || source
+    const tgtLabel = this.graph.getNodeAttribute(target, "label") || target
+    const pct = Math.round((a.confidence ?? 0.5) * 100)
+    const certaintyIcon = { solid: "—", dashed: "- -", dotted: "···" }[a.certainty] || "—"
+
+    const tip = document.getElementById("node-tooltip")
+    if (tip) {
+      tip.innerHTML =
+        `<p style="font-size:11px;opacity:0.5;margin-bottom:4px;text-transform:uppercase;letter-spacing:.05em">${escHtml(a.type || "relates")} ${certaintyIcon}${a.cross_graph ? " · cross-graph" : ""}</p>` +
+        `<p style="line-height:1.5;font-size:12px;">${escHtml(srcLabel)}</p>` +
+        `<p style="line-height:1.5;font-size:12px;opacity:0.5">↓</p>` +
+        `<p style="line-height:1.5;font-size:12px;">${escHtml(tgtLabel)}</p>` +
+        `<div style="display:flex;align-items:center;gap:6px;margin-top:6px;padding-top:6px;border-top:1px solid rgba(128,128,128,0.2)">` +
+          `<span style="font-size:11px;opacity:0.5;white-space:nowrap">Confidence</span>` +
+          `<div style="flex:1;height:4px;border-radius:2px;background:rgba(128,128,128,0.2);overflow:hidden">` +
+            `<div style="height:100%;border-radius:2px;background:var(--color-primary);width:${pct}%"></div>` +
+          `</div>` +
+          `<span style="font-size:11px;opacity:0.6;font-variant-numeric:tabular-nums">${pct}%</span>` +
+        `</div>`
+      this._positionTooltip(tip)
+      tip.style.display = "block"
+    }
+    this.sigma.refresh()
+  },
+
+  _dismissEdgeSelection() {
+    if (!this._selectedEdge) return
+    this._selectedEdge = null
+    this._edgeHighlightedNodes = new Set()
+    const tip = document.getElementById("node-tooltip")
+    if (tip) { tip.style.display = "none"; tip.innerHTML = "" }
+    this.sigma.refresh()
+  },
+
+  // Find the closest visible edge to (px, py) in container pixels.
+  // Uses sigma.graphToViewport() for coordinate conversion.
+  // Returns edge id or null if nothing within threshold pixels.
+  _findEdgeAtPoint(px, py) {
+    const THRESHOLD = 8
+    let bestId = null
+    let bestDist = THRESHOLD
+    this.graph.forEachEdge((id, _attrs, source, target) => {
+      if (this._hiddenEdges.has(id) || this._overlayHiddenEdges.has(id)) return
+      const sx = this.graph.getNodeAttribute(source, "x")
+      const sy = this.graph.getNodeAttribute(source, "y")
+      const tx = this.graph.getNodeAttribute(target, "x")
+      const ty = this.graph.getNodeAttribute(target, "y")
+      const sp = this.sigma.graphToViewport({x: sx, y: sy})
+      const tp = this.sigma.graphToViewport({x: tx, y: ty})
+      const dist = pointToSegDist(px, py, sp.x, sp.y, tp.x, tp.y)
+      if (dist < bestDist) { bestDist = dist; bestId = id }
+    })
+    return bestId
   },
 
   // nodeReducer: called by Sigma on every render pass for each node.
@@ -1155,6 +1409,16 @@ const SigmaGraph = {
     if (this._dimmedNodes.has(id)) {
       result.color = colors.neutral
       result.size = Math.max(result.size * 0.5, 3)
+      return result
+    }
+
+    // Edge selection: highlight the two endpoint nodes
+    if (this._selectedEdge) {
+      if (this._edgeHighlightedNodes.has(id)) {
+        result.color = "#f59e0b"
+        result.size = result.size + 5
+        result.zIndex = 25
+      }
       return result
     }
 
@@ -1193,17 +1457,28 @@ const SigmaGraph = {
 
   // edgeReducer: called by Sigma on every render pass for each edge.
   _edgeReducer(id, attrs, colors) {
+    const confidence = attrs.confidence ?? 0.5
+    // Opacity: low-confidence edges fade to 25%, high-confidence stay fully visible.
+    const alpha = Math.round((0.25 + confidence * 0.75) * 255).toString(16).padStart(2, "0")
     const result = {
-      color: colors.neutral,
-      size: 0.5 + (attrs.confidence ?? 0.5) * 2,
+      color: colors.neutral.slice(0, 7) + alpha,
+      size: 0.5 + confidence * 2,
       hidden: false,
       zIndex: 0,
     }
 
-    if (attrs.cross_graph) result.color = "#f59e0b"
+    if (attrs.cross_graph) result.color = "#f59e0b" + alpha
 
     // Degree filter
     if (this._hiddenEdges.has(id)) { result.hidden = true; return result }
+
+    // Edge click: highlight selected edge prominently
+    if (this._selectedEdge === id) {
+      result.color = edgeTypeColor(attrs.type)
+      result.size = 4
+      result.zIndex = 2
+      return result
+    }
 
     // Overlay visibility
     if (this._overlayHiddenEdges.has(id)) { result.hidden = true; return result }
@@ -1227,6 +1502,15 @@ const SigmaGraph = {
 
     return result
   },
+}
+
+// Distance from point (px,py) to line segment (ax,ay)→(bx,by), in pixels.
+function pointToSegDist(px, py, ax, ay, bx, by) {
+  const dx = bx - ax, dy = by - ay
+  const lenSq = dx * dx + dy * dy
+  if (lenSq === 0) return Math.hypot(px - ax, py - ay)
+  const t = Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / lenSq))
+  return Math.hypot(px - (ax + t * dx), py - (ay + t * dy))
 }
 
 // Assign one of 3 colors to an edge based on its type string.
