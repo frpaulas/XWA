@@ -569,6 +569,18 @@ defmodule Xwa.Graph.Nodes do
     )
   end
 
+  @doc """
+  Deletes all Claim nodes (and their relationships) sourced from a given document.
+  """
+  @spec delete_by_document(String.t(), String.t()) :: :ok | {:error, any()}
+  def delete_by_document(graph_id, document_id)
+      when is_binary(graph_id) and is_binary(document_id) do
+    Graph.run(
+      "MATCH (n:Claim {graph_id: $graph_id, source_document_id: $document_id}) DETACH DELETE n",
+      %{graph_id: graph_id, document_id: document_id}
+    )
+  end
+
   # ---------------------------------------------------------------------------
   # Private helpers
   # ---------------------------------------------------------------------------

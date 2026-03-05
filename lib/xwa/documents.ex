@@ -248,6 +248,52 @@ defmodule Xwa.Documents do
   end
 
   @doc """
+  Removes a document and all its derived graph data (claims + edges) in one call.
+
+  Deletes Memgraph nodes first (DETACH DELETE cascades their edges), then
+  removes the Postgres document record (which cascades document_contents).
+
+  Returns `:ok` or `{:error, reason}`.
+  """
+  def delete_document_with_claims(%Document{} = document, graph_id) do
+    alias Xwa.Graph.Nodes
+
+    with :ok <- Nodes.delete_by_document(graph_id, document.id),
+         {:ok, _} <- Repo.delete(document) do
+      :ok
+    else
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @doc """
+  Persists re-extracted text for a document whose extracted_text was previously nil.
+  Only updates plaintext documents (encryption_tier nil). Encrypted documents would
+  need re-encryption, which is more complex — skip and just use the in-memory text.
+  """
+  def update_extracted_text(document_id, text) when is_binary(text) do
+    doc = Repo.get(Document, document_id)
+
+    if is_nil(doc) or doc.encryption_tier != nil do
+      :ok
+    else
+      case Repo.get_by(DocumentContent, document_id: document_id) do
+        nil ->
+          :ok
+
+        content ->
+          content
+          |> DocumentContent.changeset(%{extracted_text: text})
+          |> Repo.update()
+          |> case do
+            {:ok, _} -> :ok
+            {:error, _} -> :ok
+          end
+      end
+    end
+  end
+
+  @doc """
   Returns true if any document in the graph is currently being processed.
   Used to enforce sequential ingestion.
   """

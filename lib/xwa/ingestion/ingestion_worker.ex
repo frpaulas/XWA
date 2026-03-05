@@ -29,7 +29,7 @@ defmodule Xwa.Ingestion.IngestionWorker do
 
   alias Xwa.Documents
   alias Xwa.Graph.{Nodes, Edges}
-  alias Xwa.Ingestion.{ClaimExtractor, DocumentSegmenter, EdgeExtractor, ExtractionRuns, VoyageEmbedder}
+  alias Xwa.Ingestion.{ClaimExtractor, DocumentSegmenter, EdgeExtractor, ExtractionRuns, TextExtractor, VoyageEmbedder}
 
   @neighbourhood_size 20
   @prompt_version "v1"
@@ -119,12 +119,30 @@ defmodule Xwa.Ingestion.IngestionWorker do
   # ---------------------------------------------------------------------------
 
   defp load_content(document_id, requesting_user_id) do
+    doc = Documents.get_document!(document_id)
+
     case Documents.get_decrypted_content(document_id, requesting_user_id) do
       {:ok, %{extracted_text: text}} when is_binary(text) and text != "" ->
-        doc = Documents.get_document!(document_id)
         {:ok, doc, text}
 
-      {:ok, %{extracted_text: nil}} ->
+      {:ok, %{content: raw}} when is_binary(raw) ->
+        # extracted_text was nil or empty — attempt re-extraction from the stored binary
+        Logger.info("[Ingestion] extracted_text missing for #{document_id} — re-extracting from binary")
+        ct = doc.content_type || "application/octet-stream"
+
+        case TextExtractor.extract(raw, ct) do
+          {:ok, text} when is_binary(text) and text != "" ->
+            Documents.update_extracted_text(document_id, text)
+            {:ok, doc, text}
+
+          {:ok, _} ->
+            {:error, :no_extracted_text}
+
+          {:error, reason} ->
+            {:error, {:text_extraction_failed, reason}}
+        end
+
+      {:ok, _} ->
         {:error, :no_extracted_text}
 
       {:error, reason} ->

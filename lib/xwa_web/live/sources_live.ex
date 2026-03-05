@@ -45,6 +45,7 @@ defmodule XwaWeb.SourcesLive do
       |> assign(:pending_extracted_text, nil)
       |> assign(:form, nil)
       |> assign(:doc_modal, nil)
+      |> assign(:confirm_delete_id, nil)
       |> allow_upload(:document,
         accept: @accepted_types,
         max_entries: 1,
@@ -86,10 +87,17 @@ defmodule XwaWeb.SourcesLive do
             {File.read!(path), e.client_type, e.client_name}
           end)
 
-        extracted_text =
+        {extracted_text, socket} =
           case TextExtractor.extract(binary, content_type) do
-            {:ok, text} -> text
-            {:error, _} -> nil
+            {:ok, text} when is_binary(text) and text != "" ->
+              {text, socket}
+
+            {:ok, _} ->
+              {nil, put_flash(socket, :warning, "Text extraction returned empty content. Ingestion will fail — try a different file.")}
+
+            {:error, reason} ->
+              msg = "Could not extract text from this file (#{inspect(reason)}). Ingestion will fail."
+              {nil, put_flash(socket, :error, msg)}
           end
 
         assign(socket,
@@ -242,6 +250,43 @@ defmodule XwaWeb.SourcesLive do
     {:noreply, cancel_upload(socket, :document, ref)}
   end
 
+  def handle_event("confirm_delete", %{"id" => id}, socket) do
+    {:noreply, assign(socket, :confirm_delete_id, id)}
+  end
+
+  def handle_event("cancel_delete", _params, socket) do
+    {:noreply, assign(socket, :confirm_delete_id, nil)}
+  end
+
+  def handle_event("delete_document", %{"id" => id}, socket) do
+    graph_id = socket.assigns.current_scope.graph_id
+
+    socket =
+      case Documents.get_document_for_graph(id, graph_id) do
+        nil ->
+          put_flash(socket, :error, "Document not found.")
+
+        doc ->
+          case Documents.delete_document_with_claims(doc, graph_id) do
+            :ok ->
+              Phoenix.PubSub.broadcast(Xwa.PubSub, "graph:#{graph_id}", {:graph_changed, graph_id})
+              documents = Documents.list_documents_for_graph(graph_id)
+
+              socket
+              |> assign(:documents, documents)
+              |> assign(:confirm_delete_id, nil)
+              |> put_flash(:info, "\"#{doc.title}\" and its claims have been removed.")
+
+            {:error, reason} ->
+              socket
+              |> assign(:confirm_delete_id, nil)
+              |> put_flash(:error, "Delete failed: #{inspect(reason)}")
+          end
+      end
+
+    {:noreply, socket}
+  end
+
   def handle_event("retry_ingestion", %{"id" => id}, socket) do
     user_id = socket.assigns.current_scope.user.id
     graph_id = socket.assigns.current_scope.graph_id
@@ -369,6 +414,7 @@ defmodule XwaWeb.SourcesLive do
                   <th class="px-4 py-3 text-left font-medium text-base-content/60 whitespace-nowrap hidden md:table-cell">Layer</th>
                   <th class="px-4 py-3 text-left font-medium text-base-content/60 whitespace-nowrap hidden sm:table-cell">Type</th>
                   <th class="px-4 py-3 text-left font-medium text-base-content/60 whitespace-nowrap">Status</th>
+                  <th class="px-4 py-3 w-10"></th>
                 </tr>
               </thead>
               <tbody class="divide-y divide-base-200">
@@ -435,6 +481,16 @@ defmodule XwaWeb.SourcesLive do
                         <% end %>
                       </div>
                     </td>
+                    <td class="px-2 py-3">
+                      <button
+                        phx-click="confirm_delete"
+                        phx-value-id={doc.id}
+                        title="Remove document and claims"
+                        class="flex h-7 w-7 items-center justify-center rounded-lg text-base-content/30 hover:text-error hover:bg-error/10 transition-colors"
+                      >
+                        <.icon name="hero-trash" class="w-4 h-4" />
+                      </button>
+                    </td>
                   </tr>
                 <% end %>
               </tbody>
@@ -465,6 +521,46 @@ defmodule XwaWeb.SourcesLive do
               <% else %>
                 <p class="text-sm text-base-content/50 text-center py-8">No extracted text available for this document.</p>
               <% end %>
+            </div>
+          </div>
+        </div>
+      <% end %>
+
+      <%!-- Delete confirmation modal --%>
+      <%= if @confirm_delete_id do %>
+        <%
+          del_doc = Enum.find(@documents, &(&1.id == @confirm_delete_id))
+        %>
+        <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
+          <div class="bg-base-100 rounded-2xl shadow-2xl w-full max-w-sm mx-4 p-6 flex flex-col gap-4">
+            <div class="flex items-center gap-3">
+              <div class="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-error/10">
+                <.icon name="hero-trash" class="w-5 h-5 text-error" />
+              </div>
+              <div>
+                <h3 class="text-sm font-semibold text-base-content">Remove document?</h3>
+                <p class="text-xs text-base-content/55 mt-0.5 break-words">
+                  <%= if del_doc, do: "\"#{del_doc.title}\"", else: "This document" %>
+                </p>
+              </div>
+            </div>
+            <p class="text-sm text-base-content/70">
+              This will permanently delete the document and all claims extracted from it. This cannot be undone.
+            </p>
+            <div class="flex justify-end gap-3">
+              <button
+                phx-click="cancel_delete"
+                class="rounded-lg border border-base-300 px-4 py-2 text-sm font-medium text-base-content/70 hover:bg-base-200 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                phx-click="delete_document"
+                phx-value-id={@confirm_delete_id}
+                class="inline-flex items-center gap-2 rounded-lg bg-error px-4 py-2 text-sm font-semibold text-error-content hover:brightness-110 active:scale-95 transition-all"
+              >
+                <.icon name="hero-trash" class="w-4 h-4" /> Delete
+              </button>
             </div>
           </div>
         </div>
