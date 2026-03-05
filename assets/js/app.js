@@ -656,6 +656,30 @@ const SigmaGraph = {
       nodeProgramClasses: { piechart: NodePiechartProgram, sphere: NodeSphereProgram },
       nodeReducer: (id, attrs) => this._nodeReducer(id, attrs, colors),
       edgeReducer: (id, attrs) => this._edgeReducer(id, attrs, colors),
+      defaultDrawNodeLabel: (context, data, settings) => {
+        if (!data.label) return
+        const size   = settings.labelSize
+        const font   = settings.labelFont
+        const weight = settings.labelWeight
+        context.font = `${weight} ${size}px ${font}`
+
+        const textW   = context.measureText(data.label).width
+        const pad     = 3
+        const x       = data.x + data.size + 3
+        const y       = data.y + size / 3
+        const boxX    = x - pad
+        const boxY    = y - size * 0.82 - pad
+        const boxW    = textW + pad * 2
+        const boxH    = size * 1.1 + pad * 2
+
+        context.fillStyle = "rgba(255, 255, 255, 0.88)"
+        context.beginPath()
+        context.roundRect(boxX, boxY, boxW, boxH, 3)
+        context.fill()
+
+        context.fillStyle = "#222"
+        context.fillText(data.label, x, y)
+      },
     })
 
     this._initBoxSelect()
@@ -1386,6 +1410,15 @@ const SigmaGraph = {
   // nodeReducer: called by Sigma on every render pass for each node.
   // Returns the display attributes for that node based on current state.
   _nodeReducer(id, attrs, colors) {
+    // Show labels when few nodes are currently visible.
+    // Use visible count (total minus degree-filtered and overlay-hidden) so the
+    // label threshold responds to degree filters and neighborhood hopping, not
+    // just total graph size.
+    const visibleCount = this.graph.order - this._hiddenNodes.size - this._overlayHidden.size
+    const labelText = visibleCount <= 10
+      ? (() => { const s = attrs.label || ""; return s.length > 28 ? s.slice(0, 25) + "…" : s })()
+      : undefined
+
     const result = {
       x: attrs.x,
       y: attrs.y,
@@ -1395,6 +1428,7 @@ const SigmaGraph = {
       slice_a: attrs.slice_a,  // piechart slices for synthesis nodes
       slice_b: attrs.slice_b,
       hidden: false,
+      label: labelText,
       // Degree-based zIndex 0–10; trail=20, selected/hover=30 always on top.
       zIndex: Math.round((this.graph.degree(id) / Math.max(this._maxDegree, 1)) * 10),
     }
