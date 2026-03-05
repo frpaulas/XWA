@@ -32,6 +32,9 @@ config :bolt_sips, Bolt,
   prefix: :default
 
 # Configure your database
+# pool_size is kept small because dev uses a fly proxy tunnel (localhost:5433)
+# which doesn't handle many concurrent persistent TCP connections well.
+# queue_target/queue_interval give background ingestion tasks more breathing room.
 config :xwa, Xwa.Repo,
   username: System.get_env("XWA_DB_USER") || "xwa",
   password: System.get_env("XWA_DB_PASSWORD") || raise("XWA_DB_PASSWORD env var not set"),
@@ -40,7 +43,9 @@ config :xwa, Xwa.Repo,
   database: System.get_env("XWA_DB_NAME") || "xwa",
   stacktrace: true,
   show_sensitive_data_on_connection_error: true,
-  pool_size: 10
+  pool_size: 5,
+  queue_target: 10_000,
+  queue_interval: 60_000
 
 # For development, we disable any cache and enable
 # debugging and code reloading.
@@ -90,12 +95,12 @@ config :xwa, XwaWeb.Endpoint,
     web_console_logger: true,
     patterns: [
       # Static assets, except user uploads
-      ~r"priv/static/(?!uploads/).*\.(js|css|png|jpeg|jpg|gif|svg)$"E,
+      ~r"priv/static/(?!uploads/).*\.(js|css|png|jpeg|jpg|gif|svg)$",
       # Gettext translations
-      ~r"priv/gettext/.*\.po$"E,
+      ~r"priv/gettext/.*\.po$",
       # Router, Controllers, LiveViews and LiveComponents
-      ~r"lib/xwa_web/router\.ex$"E,
-      ~r"lib/xwa_web/(controllers|live|components)/.*\.(ex|heex)$"E
+      ~r"lib/xwa_web/router\.ex$",
+      ~r"lib/xwa_web/(controllers|live|components)/.*\.(ex|heex)$"
     ]
   ]
 

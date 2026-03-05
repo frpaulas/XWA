@@ -29,7 +29,7 @@ defmodule Xwa.Ingestion.IngestionWorker do
 
   alias Xwa.Documents
   alias Xwa.Graph.{Nodes, Edges}
-  alias Xwa.Ingestion.{ClaimExtractor, EdgeExtractor, ExtractionRuns, HearingSegmenter, VoyageEmbedder}
+  alias Xwa.Ingestion.{ClaimExtractor, DocumentSegmenter, EdgeExtractor, ExtractionRuns, VoyageEmbedder}
 
   @neighbourhood_size 20
   @prompt_version "v1"
@@ -62,6 +62,7 @@ defmodule Xwa.Ingestion.IngestionWorker do
         Documents.update_ingestion_status(doc, "complete")
         Phoenix.PubSub.broadcast(Xwa.PubSub, "graph:#{graph_id}", {:ingestion_complete, document_id})
         Logger.info("[Ingestion] Completed ingestion for document #{document_id}")
+        start_next_pending(requesting_user_id, graph_id)
         :ok
 
       {:error, reason} ->
@@ -73,16 +74,40 @@ defmodule Xwa.Ingestion.IngestionWorker do
         end
 
         Phoenix.PubSub.broadcast(Xwa.PubSub, "graph:#{graph_id}", {:ingestion_failed, document_id})
+        start_next_pending(requesting_user_id, graph_id)
         {:error, reason}
     end
   end
 
+  defp start_next_pending(requesting_user_id, graph_id) do
+    case Documents.next_pending(graph_id) do
+      nil ->
+        :ok
+
+      doc ->
+        Logger.info("[Ingestion] Starting next pending document #{doc.id} for graph #{graph_id}")
+        start_task(doc.id, doc.created_by || requesting_user_id, graph_id)
+    end
+  end
+
   @doc """
-  Spawns the ingestion pipeline in a supervised Task.
-  Returns the Task reference immediately.
+  Spawns the ingestion pipeline in a supervised Task if no other document in
+  the graph is currently processing. If one is, the document stays pending and
+  will be picked up automatically when the active job finishes.
+
+  Returns `{:ok, pid}` when started or `{:ok, :queued}` when deferred.
   """
-  @spec run_async(String.t(), String.t(), String.t()) :: {:ok, pid()}
+  @spec run_async(String.t(), String.t(), String.t()) :: {:ok, pid()} | {:ok, :queued}
   def run_async(document_id, requesting_user_id, graph_id) do
+    if Documents.any_processing?(graph_id) do
+      Logger.info("[Ingestion] Graph #{graph_id} has a document processing — queuing #{document_id}")
+      {:ok, :queued}
+    else
+      start_task(document_id, requesting_user_id, graph_id)
+    end
+  end
+
+  defp start_task(document_id, requesting_user_id, graph_id) do
     Task.Supervisor.start_child(
       Xwa.TaskSupervisor,
       fn -> run(document_id, requesting_user_id, graph_id) end
@@ -118,19 +143,62 @@ defmodule Xwa.Ingestion.IngestionWorker do
   # from each segment in sequence. For all other source types, falls through to
   # a single extraction pass (segment = the whole document text).
   defp extract_all_claims(doc, text, requesting_user_id, graph_id) do
-    segments =
-      if doc.source_type == "congressional_hearing" do
-        HearingSegmenter.segment(text)
-      else
-        [%{text: text, from_line: nil, to_line: nil, segment_type: nil, speaker: nil}]
-      end
+    segments = DocumentSegmenter.segment(text)
 
-    Enum.reduce_while(segments, {:ok, []}, fn seg, {:ok, acc} ->
-      case extract_claims(doc, seg, requesting_user_id, graph_id) do
-        {:ok, nodes} -> {:cont, {:ok, acc ++ nodes}}
-        {:error, reason} -> {:halt, {:error, reason}}
-      end
-    end)
+    result =
+      Enum.reduce_while(segments, {:ok, []}, fn seg, {:ok, acc} ->
+        case extract_claims(doc, seg, requesting_user_id, graph_id) do
+          {:ok, nodes} -> {:cont, {:ok, acc ++ nodes}}
+          {:error, reason} -> {:halt, {:error, reason}}
+        end
+      end)
+
+    case result do
+      {:ok, nodes} ->
+        deduped = dedup_claims(nodes)
+        dropped = length(nodes) - length(deduped)
+        if dropped > 0, do: Logger.info("[Ingestion] Deduped #{dropped} near-duplicate claim(s) from document #{doc.id}")
+        {:ok, deduped}
+
+      error ->
+        error
+    end
+  end
+
+  # Removes near-duplicate claims within a single document run using word-set
+  # Jaccard similarity. Keeps the first occurrence when similarity exceeds the
+  # threshold. This catches both exact duplicates and paraphrased claims that
+  # arise when the same content appears at a segment boundary.
+  @jaccard_threshold 0.75
+
+  defp dedup_claims(nodes) do
+    {kept, _seen} =
+      Enum.reduce(nodes, {[], []}, fn node, {acc, seen_word_sets} ->
+        words = content_word_set(node.content)
+
+        if Enum.any?(seen_word_sets, &(jaccard(&1, words) >= @jaccard_threshold)) do
+          {acc, seen_word_sets}
+        else
+          {[node | acc], [words | seen_word_sets]}
+        end
+      end)
+
+    Enum.reverse(kept)
+  end
+
+  defp content_word_set(nil), do: MapSet.new()
+  defp content_word_set(text) do
+    text
+    |> String.downcase()
+    |> String.replace(~r/[^a-z0-9\s]/, "")
+    |> String.split(~r/\s+/, trim: true)
+    |> MapSet.new()
+  end
+
+  defp jaccard(set_a, set_b) do
+    intersection = MapSet.intersection(set_a, set_b) |> MapSet.size()
+    union = MapSet.union(set_a, set_b) |> MapSet.size()
+    if union == 0, do: 1.0, else: intersection / union
   end
 
   defp extract_claims(doc, %{text: text} = segment, requesting_user_id, graph_id) do
@@ -424,7 +492,8 @@ defmodule Xwa.Ingestion.IngestionWorker do
       :chair           -> "Committee Chair"
       :ranking_member  -> "Ranking Member"
       :witness         -> "Witness"
-      _                -> "Member of Congress"
+      :member          -> "Member of Congress"
+      _                -> "Speaker"
     end
 
     affiliation = if speaker[:affiliation], do: " (#{speaker[:affiliation]})", else: ""
@@ -433,6 +502,7 @@ defmodule Xwa.Ingestion.IngestionWorker do
       :opening_statement -> "Opening Statement"
       :witness_statement -> "Witness Testimony"
       :qa_turn           -> "Q&A"
+      :dialogue_turn     -> "Statement"
       _                  -> "Statement"
     end
 

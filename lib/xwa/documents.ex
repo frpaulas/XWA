@@ -113,7 +113,7 @@ defmodule Xwa.Documents do
   end
 
   @doc """
-  Finds a document by content hash. Useful for deduplication during ingestion.
+  Finds a document by content hash within a graph. Useful for deduplication during ingestion.
   Returns nil if not found.
   """
   def get_document_by_hash(hash, graph_id) when is_binary(hash) and is_binary(graph_id) do
@@ -245,6 +245,30 @@ defmodule Xwa.Documents do
   """
   def delete_document(%Document{} = document) do
     Repo.delete(document)
+  end
+
+  @doc """
+  Returns true if any document in the graph is currently being processed.
+  Used to enforce sequential ingestion.
+  """
+  def any_processing?(graph_id) do
+    Repo.exists?(
+      from d in Document,
+        where: d.graph_id == ^graph_id and d.ingestion_status == "processing"
+    )
+  end
+
+  @doc """
+  Returns the oldest pending document for the graph, or nil.
+  Used to pick up the next document after one finishes processing.
+  """
+  def next_pending(graph_id) do
+    Repo.one(
+      from d in Document,
+        where: d.graph_id == ^graph_id and d.ingestion_status == "pending",
+        order_by: [asc: d.inserted_at],
+        limit: 1
+    )
   end
 
   # ---------------------------------------------------------------------------

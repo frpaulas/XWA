@@ -21,9 +21,11 @@ defmodule XwaWeb.Router do
     get "/", PageController, :home
     post "/graph/switch", GraphController, :switch
 
-    # Local username/password login
+    # Local username/password auth
     get "/login", LocalSessionController, :new
     post "/login", LocalSessionController, :create
+    get "/register", LocalSessionController, :register
+    post "/register", LocalSessionController, :register_create
   end
 
   scope "/", XwaWeb do

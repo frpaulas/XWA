@@ -72,6 +72,9 @@ defmodule Xwa.Ingestion.ClaimExtractor do
     {:ok, prompt}
   end
 
+  @max_retries 2
+  @retry_base_delay_ms 2_000
+
   defp call_claude(prompt) do
     api_key =
       Application.get_env(:xwa, :anthropic_api_key) ||
@@ -80,47 +83,61 @@ defmodule Xwa.Ingestion.ClaimExtractor do
     if is_nil(api_key) do
       {:error, :anthropic_api_key_not_configured}
     else
-      body = %{
-        model: model(),
-        max_tokens: 8192,
-        messages: [%{role: "user", content: prompt}]
-      }
+      call_claude_with_retry(prompt, api_key, 0)
+    end
+  end
 
-      t0 = System.monotonic_time(:millisecond)
+  defp call_claude_with_retry(prompt, api_key, attempt) do
+    body = %{
+      model: model(),
+      max_tokens: 16384,
+      messages: [%{role: "user", content: prompt}]
+    }
 
-      result =
-        Req.post("https://api.anthropic.com/v1/messages",
-          json: body,
-          headers: [
-            {"x-api-key", api_key},
-            {"anthropic-version", "2023-06-01"}
-          ],
-          receive_timeout: 120_000
-        )
+    t0 = System.monotonic_time(:millisecond)
 
-      latency_ms = System.monotonic_time(:millisecond) - t0
+    result =
+      Req.post("https://api.anthropic.com/v1/messages",
+        json: body,
+        headers: [
+          {"x-api-key", api_key},
+          {"anthropic-version", "2023-06-01"}
+        ],
+        receive_timeout: 300_000
+      )
 
-      case result do
-        {:ok, %{status: 200, body: resp_body}} ->
-          usage = %{
-            input_tokens: get_in(resp_body, ["usage", "input_tokens"]),
-            output_tokens: get_in(resp_body, ["usage", "output_tokens"]),
-            finish_reason: resp_body["stop_reason"],
-            latency_ms: latency_ms,
-            model: resp_body["model"] || model()
-          }
+    latency_ms = System.monotonic_time(:millisecond) - t0
 
-          case extract_text_from_response(resp_body) do
-            {:ok, text} -> {:ok, text, usage}
-            error -> error
-          end
+    case result do
+      {:ok, %{status: 200, body: resp_body}} ->
+        usage = %{
+          input_tokens: get_in(resp_body, ["usage", "input_tokens"]),
+          output_tokens: get_in(resp_body, ["usage", "output_tokens"]),
+          finish_reason: resp_body["stop_reason"],
+          latency_ms: latency_ms,
+          model: resp_body["model"] || model()
+        }
 
-        {:ok, %{status: status, body: resp_body}} ->
-          {:error, {:api_error, status, resp_body}}
+        case extract_text_from_response(resp_body) do
+          {:ok, text} -> {:ok, text, usage}
+          error -> error
+        end
 
-        {:error, reason} ->
-          {:error, {:http_error, reason}}
-      end
+      {:ok, %{status: 529}} when attempt < @max_retries ->
+        delay = @retry_base_delay_ms * :math.pow(2, attempt) |> round()
+        Process.sleep(delay)
+        call_claude_with_retry(prompt, api_key, attempt + 1)
+
+      {:ok, %{status: status, body: resp_body}} ->
+        {:error, {:api_error, status, resp_body}}
+
+      {:error, %Req.TransportError{reason: reason}} when reason in [:timeout, :closed, :econnreset] and attempt < @max_retries ->
+        delay = @retry_base_delay_ms * :math.pow(2, attempt) |> round()
+        Process.sleep(delay)
+        call_claude_with_retry(prompt, api_key, attempt + 1)
+
+      {:error, reason} ->
+        {:error, {:http_error, reason}}
     end
   end
 
@@ -149,9 +166,16 @@ defmodule Xwa.Ingestion.ClaimExtractor do
   end
 
   defp extract_json(text) do
-    case Regex.run(~r/```(?:json)?\s*([\s\S]*?)```/m, text, capture: :all_but_first) do
-      [json] -> String.trim(json)
-      nil -> String.trim(text)
+    trimmed = String.trim(text)
+    cond do
+      # Complete code fence (normal case)
+      m = Regex.run(~r/```(?:json)?\s*([\s\S]*?)```/m, trimmed, capture: :all_but_first) ->
+        String.trim(hd(m))
+      # Opening fence only — response was truncated before the closing fence
+      m = Regex.run(~r/```(?:json)?\s*([\s\S]+)/m, trimmed, capture: :all_but_first) ->
+        String.trim(hd(m))
+      true ->
+        trimmed
     end
   end
 

@@ -89,9 +89,9 @@ defmodule Xwa.Documents.Document do
     |> validate_inclusion(:ingestion_status, @ingestion_statuses)
     |> validate_inclusion(:encryption_tier, @encryption_tiers, skip_is_nil: true)
     |> validate_storage_ref()
-    |> unique_constraint(:content_hash,
-      name: :documents_content_hash_unique,
-      message: "a document with this content already exists"
+    |> unique_constraint([:content_hash, :graph_id],
+      name: :documents_content_hash_graph_unique,
+      message: "a document with this content already exists in this graph"
     )
   end
 

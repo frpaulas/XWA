@@ -181,7 +181,7 @@ defmodule XwaWeb.SourcesLive do
             extracted_text = socket.assigns.pending_extracted_text
 
             doc_attrs = %{
-              title: params["title"],
+              title: params["title"] |> String.split() |> Enum.join(" "),
               filename: filename,
               content_type: content_type,
               byte_size: byte_size(binary),
@@ -406,13 +406,14 @@ defmodule XwaWeb.SourcesLive do
                           ]}>
                             {doc.ingestion_status}
                           </span>
-                          <%= if doc.ingestion_status == "failed" do %>
+                          <%= if doc.ingestion_status in ["failed", "processing"] do %>
                             <button
                               phx-click="retry_ingestion"
                               phx-value-id={doc.id}
                               class="inline-flex items-center gap-1 rounded-md bg-warning/15 border border-warning/30 px-2 py-0.5 text-xs font-medium text-warning-content hover:bg-warning/25 transition-colors"
                             >
-                              <.icon name="hero-arrow-path" class="w-3 h-3" /> Retry
+                              <.icon name="hero-arrow-path" class="w-3 h-3" />
+                              <%= if doc.ingestion_status == "processing", do: "Reset & Retry", else: "Retry" %>
                             </button>
                           <% end %>
                         </div>
