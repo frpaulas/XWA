@@ -42,10 +42,15 @@ defmodule XwaWeb.Router do
       live "/admin/upload", AdminUploadLive
     end
 
-    # Public read-only demo — loads govinfo's graph without requiring auth.
-    live_session :demo,
-      on_mount: {XwaWeb.DemoMount, :demo} do
-      live "/demo", GraphLive
+    # Public read-only demos — each loads a specific user's graph without auth.
+    live_session :demo1,
+      on_mount: {XwaWeb.DemoMount, :demo1} do
+      live "/demo1", GraphLive
+    end
+
+    live_session :demo2,
+      on_mount: {XwaWeb.DemoMount, :demo2} do
+      live "/demo2", GraphLive
     end
   end
 

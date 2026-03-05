@@ -1,12 +1,9 @@
 defmodule XwaWeb.DemoMount do
   @moduledoc """
-  LiveView on_mount hook for the public /demo route.
+  LiveView on_mount hook for public demo routes.
 
-  Loads the "govinfo" local user's graph scope and marks the socket as
-  read_only so the GraphLive template hides all write actions.
-
-  If the govinfo user does not exist, visitors are redirected to the home
-  page with an informational flash.
+  Each demo atom maps to a local username whose graph is shown read-only.
+  If the user does not exist, visitors are redirected to the home page.
   """
 
   import Phoenix.Component, only: [assign: 3]
@@ -15,8 +12,16 @@ defmodule XwaWeb.DemoMount do
   alias Xwa.Accounts
   alias Xwa.Graphs
 
-  def on_mount(:demo, _params, _session, socket) do
-    case Accounts.get_user_by_username("govinfo") do
+  # /demo1 → gv2's graph
+  def on_mount(:demo1, params, session, socket),
+    do: mount_for("gv2", params, session, socket)
+
+  # /demo2 → Jonah's graph
+  def on_mount(:demo2, params, session, socket),
+    do: mount_for("Jonah", params, session, socket)
+
+  defp mount_for(username, _params, _session, socket) do
+    case Accounts.get_user_by_username(username) do
       nil ->
         socket =
           socket
