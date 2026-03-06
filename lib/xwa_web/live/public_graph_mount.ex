@@ -20,7 +20,7 @@ defmodule XwaWeb.PublicGraphMount do
   alias Xwa.Graphs
   alias Xwa.Accounts
 
-  def on_mount(:load, %{"username" => username, "slug" => slug}, _session, socket) do
+  def on_mount(:load, %{"username" => username, "slug" => slug}, session, socket) do
     case Graphs.get_public_graph_by_slug(username, slug) do
       nil ->
         socket =
@@ -36,6 +36,7 @@ defmodule XwaWeb.PublicGraphMount do
 
         graph = Enum.find(graphs, &(&1.id == graph_info.id))
 
+        # current_scope uses the owner's identity so GraphLive can load graph data
         scope = %{
           user: owner,
           graph: graph,
@@ -44,12 +45,25 @@ defmodule XwaWeb.PublicGraphMount do
           graphs: graphs
         }
 
+        # viewer is the actual authenticated visitor (nil if not signed in)
+        viewer = load_viewer(session)
+
         socket =
           socket
           |> assign(:current_scope, scope)
+          |> assign(:viewer, viewer)
           |> assign(:read_only, true)
 
         {:cont, socket}
+    end
+  end
+
+  defp load_viewer(session) do
+    with user_id when not is_nil(user_id) <- session["user_id"],
+         user when not is_nil(user) <- Accounts.get_user(user_id) do
+      user
+    else
+      _ -> nil
     end
   end
 end

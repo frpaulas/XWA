@@ -37,6 +37,7 @@ defmodule XwaWeb.GraphLive do
       |> assign(:settings_open, false)
       |> assign(:settings_error, nil)
       |> assign_new(:read_only, fn -> false end)
+      |> assign_new(:viewer, fn -> nil end)
 
     {:ok, socket}
   end
@@ -722,7 +723,7 @@ defmodule XwaWeb.GraphLive do
     assigns = assign(assigns, :node_types, node_types(assigns.nodes))
 
     ~H"""
-    <Layouts.app flash={@flash} current_scope={@current_scope} read_only={@read_only}>
+    <Layouts.app flash={@flash} current_scope={@current_scope} read_only={@read_only} viewer={@viewer}>
       <div class="flex -mx-4 -my-8 overflow-hidden" style="height: calc(100vh - 4rem)">
 
         <%!-- Left sidebar: focus/explore + filters --%>

@@ -15,6 +15,10 @@ defmodule XwaWeb.Layouts do
 
   attr :read_only, :boolean, default: false, doc: "true for the public /demo route"
 
+  attr :viewer, :map,
+    default: nil,
+    doc: "the actual signed-in visitor on read-only views (separate from current_scope owner)"
+
   slot :inner_block, required: true
 
   def app(assigns) do
@@ -42,7 +46,7 @@ defmodule XwaWeb.Layouts do
                 navigate={~p"/graphs"}
                 class="flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm font-medium text-base-content/60 hover:text-base-content hover:bg-base-200 transition-colors"
               >
-                <.icon name="hero-globe-alt" class="w-4 h-4" /> Graphs
+                <.icon name="hero-globe-alt" class="w-4 h-4" /> Public Graphs
               </.link>
               <%= if @read_only && @current_scope && @current_scope.graph && @current_scope.graph.slug do %>
                 <.link
@@ -63,7 +67,15 @@ defmodule XwaWeb.Layouts do
                   navigate={~p"/graph"}
                   class="flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm font-medium text-base-content/60 hover:text-base-content hover:bg-base-200 transition-colors"
                 >
-                  <.icon name="hero-share" class="w-4 h-4" /> Reset graph
+                  <.icon name="hero-share" class="w-4 h-4" /> Reset {@current_scope && @current_scope.graph && @current_scope.graph.name || "graph"}
+                </.link>
+              <% end %>
+              <%= if @read_only && @viewer && @current_scope && @current_scope.user && @current_scope.graph do %>
+                <.link
+                  navigate={"/graphs/#{@current_scope.user.username}/#{@current_scope.graph.slug}"}
+                  class="flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm font-medium text-base-content/60 hover:text-base-content hover:bg-base-200 transition-colors"
+                >
+                  <.icon name="hero-share" class="w-4 h-4" /> Reset {@current_scope.graph.name}
                 </.link>
               <% end %>
               <.graph_switcher current_scope={@current_scope} />
@@ -82,16 +94,68 @@ defmodule XwaWeb.Layouts do
               <.theme_toggle />
 
               <%= if @read_only do %>
-                <%!-- Demo badge — no user controls for public visitors --%>
+                <%!-- Read-only badge --%>
                 <span class="hidden sm:inline-flex items-center rounded-full bg-base-200 px-3 py-1 text-xs font-medium text-base-content/50">
-                  Demo · read-only
+                  read-only
                 </span>
-                <.link
-                  href={~p"/login"}
-                  class="hidden sm:inline-flex items-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 text-xs font-semibold text-primary-content hover:brightness-110 transition-all"
-                >
-                  Sign in
-                </.link>
+                <%= if @viewer do %>
+                  <%!-- Authenticated viewer — show their identity --%>
+                  <div class="hidden sm:flex items-center gap-3">
+                    <div class="flex flex-col items-end leading-none">
+                      <span class="text-sm font-medium text-base-content">
+                        {@viewer.name || @viewer.email || @viewer.username}
+                      </span>
+                      <span class="text-xs text-base-content/50 mt-0.5">
+                        {@viewer.email || @viewer.username}
+                      </span>
+                    </div>
+
+                    <div class="relative group">
+                      <%= if @viewer.avatar_url do %>
+                        <img
+                          src={@viewer.avatar_url}
+                          alt={@viewer.name || "User avatar"}
+                          class="h-8 w-8 rounded-full ring-2 ring-base-300 group-hover:ring-primary transition-all cursor-pointer"
+                        />
+                      <% else %>
+                        <div class="h-8 w-8 rounded-full bg-primary/10 ring-2 ring-base-300 group-hover:ring-primary transition-all flex items-center justify-center cursor-pointer">
+                          <span class="text-sm font-semibold text-primary">
+                            {String.first(@viewer.name || @viewer.email || @viewer.username || "?")
+                            |> String.upcase()}
+                          </span>
+                        </div>
+                      <% end %>
+
+                      <div class="absolute right-0 top-full mt-2 w-48 rounded-xl border border-base-200 bg-base-100 shadow-lg opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all duration-150 origin-top-right">
+                        <div class="p-1">
+                          <div class="px-3 py-2 border-b border-base-200 mb-1">
+                            <p class="text-xs text-base-content/50 uppercase tracking-wide font-medium">
+                              Signed in via
+                            </p>
+                            <p class="text-sm font-medium text-base-content capitalize mt-0.5">
+                              {@viewer.provider}
+                            </p>
+                          </div>
+                          <.link
+                            href={~p"/auth/logout"}
+                            method="delete"
+                            class="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm text-base-content/70 hover:bg-base-200 hover:text-base-content transition-colors"
+                          >
+                            <.icon name="hero-arrow-right-start-on-rectangle" class="w-4 h-4" />
+                            Sign out
+                          </.link>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                <% else %>
+                  <.link
+                    href={~p"/login"}
+                    class="hidden sm:inline-flex items-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 text-xs font-semibold text-primary-content hover:brightness-110 transition-all"
+                  >
+                    Sign in
+                  </.link>
+                <% end %>
               <% else %>
                 <%= if @current_scope do %>
                   <%!-- Authenticated user menu --%>
@@ -232,7 +296,7 @@ defmodule XwaWeb.Layouts do
               navigate={~p"/graphs"}
               class="flex items-center gap-2 rounded-lg px-3 py-2.5 text-sm font-medium text-base-content/70 hover:text-base-content hover:bg-base-200 transition-colors"
             >
-              <.icon name="hero-globe-alt" class="w-4 h-4" /> Graphs
+              <.icon name="hero-globe-alt" class="w-4 h-4" /> Public Graphs
             </.link>
             <%= if @read_only && @current_scope && @current_scope.graph && @current_scope.graph.slug do %>
               <.link
@@ -250,36 +314,47 @@ defmodule XwaWeb.Layouts do
                 <.icon name="hero-circle-stack" class="w-4 h-4" /> Sources
               </.link>
             <% end %>
-            <.link
-              navigate={~p"/graph"}
-              class="flex items-center gap-2 rounded-lg px-3 py-2.5 text-sm font-medium text-base-content/70 hover:text-base-content hover:bg-base-200 transition-colors"
-            >
-              <.icon name="hero-share" class="w-4 h-4" /> Reset graph
-            </.link>
+            <%= if !@read_only do %>
+              <.link
+                navigate={~p"/graph"}
+                class="flex items-center gap-2 rounded-lg px-3 py-2.5 text-sm font-medium text-base-content/70 hover:text-base-content hover:bg-base-200 transition-colors"
+              >
+                <.icon name="hero-share" class="w-4 h-4" /> Reset {@current_scope && @current_scope.graph && @current_scope.graph.name || "graph"}
+              </.link>
+            <% end %>
+            <%= if @read_only && @viewer && @current_scope && @current_scope.user && @current_scope.graph do %>
+              <.link
+                navigate={"/graphs/#{@current_scope.user.username}/#{@current_scope.graph.slug}"}
+                class="flex items-center gap-2 rounded-lg px-3 py-2.5 text-sm font-medium text-base-content/70 hover:text-base-content hover:bg-base-200 transition-colors"
+              >
+                <.icon name="hero-share" class="w-4 h-4" /> Reset {@current_scope.graph.name}
+              </.link>
+            <% end %>
 
             <div class="my-1 border-t border-base-200"></div>
 
-            <%= if @current_scope do %>
+            <% mobile_user = if @read_only, do: @viewer, else: (@current_scope && @current_scope.user) %>
+            <%= if mobile_user do %>
               <div class="px-3 py-2 flex items-center gap-3">
-                <%= if @current_scope.user.avatar_url do %>
+                <%= if mobile_user.avatar_url do %>
                   <img
-                    src={@current_scope.user.avatar_url}
-                    alt={@current_scope.user.name || "User avatar"}
+                    src={mobile_user.avatar_url}
+                    alt={mobile_user.name || "User avatar"}
                     class="h-8 w-8 rounded-full ring-2 ring-base-300"
                   />
                 <% else %>
                   <div class="h-8 w-8 rounded-full bg-primary/10 ring-2 ring-base-300 flex items-center justify-center">
                     <span class="text-sm font-semibold text-primary">
-                      {String.first(@current_scope.user.name || @current_scope.user.email || @current_scope.user.username || "?")
+                      {String.first(mobile_user.name || mobile_user.email || mobile_user.username || "?")
                       |> String.upcase()}
                     </span>
                   </div>
                 <% end %>
                 <div class="flex flex-col leading-none">
                   <span class="text-sm font-medium text-base-content">
-                    {@current_scope.user.name || @current_scope.user.email || @current_scope.user.username}
+                    {mobile_user.name || mobile_user.email || mobile_user.username}
                   </span>
-                  <span class="text-xs text-base-content/50 mt-0.5">{@current_scope.user.email || @current_scope.user.username}</span>
+                  <span class="text-xs text-base-content/50 mt-0.5">{mobile_user.email || mobile_user.username}</span>
                 </div>
               </div>
               <.link

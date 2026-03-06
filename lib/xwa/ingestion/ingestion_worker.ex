@@ -50,7 +50,9 @@ defmodule Xwa.Ingestion.IngestionWorker do
       with {:ok, doc, text} <- load_content(document_id, requesting_user_id),
            :ok <- advance_status(doc, "processing"),
            {:ok, nodes} <- extract_all_claims(doc, text, requesting_user_id, graph_id),
-           :ok <- insert_nodes_and_edges(nodes, doc, requesting_user_id, graph_id),
+           :ok <- broadcast_progress(graph_id, document_id, length(nodes), 0),
+           {:ok, edge_count} <- insert_nodes_and_edges(nodes, doc, requesting_user_id, graph_id),
+           :ok <- broadcast_progress(graph_id, document_id, length(nodes), edge_count),
            :ok <- insert_wiki_links(text, nodes, doc, requesting_user_id, graph_id),
            :ok <- embed_nodes(nodes, doc, graph_id) do
         :ok
@@ -77,6 +79,12 @@ defmodule Xwa.Ingestion.IngestionWorker do
         start_next_pending(requesting_user_id, graph_id)
         {:error, reason}
     end
+  end
+
+  defp broadcast_progress(graph_id, document_id, claims, edges) do
+    Phoenix.PubSub.broadcast(Xwa.PubSub, "graph:#{graph_id}",
+      {:ingestion_progress, document_id, %{claims: claims, edges: edges}})
+    :ok
   end
 
   defp start_next_pending(requesting_user_id, graph_id) do
@@ -285,9 +293,9 @@ defmodule Xwa.Ingestion.IngestionWorker do
       created_by: requesting_user_id
     }
 
-    Enum.reduce_while(nodes, :ok, fn node, :ok ->
+    Enum.reduce_while(nodes, {:ok, 0}, fn node, {:ok, edge_acc} ->
       case insert_node_with_edges(node, doc, context) do
-        :ok -> {:cont, :ok}
+        {:ok, n_edges} -> {:cont, {:ok, edge_acc + n_edges}}
         {:error, reason} -> {:halt, {:error, reason}}
       end
     end)
@@ -316,6 +324,7 @@ defmodule Xwa.Ingestion.IngestionWorker do
           end
 
           insert_edges(edges)
+          {:ok, length(edges)}
 
         {:error, reason} ->
           duration_ms = System.monotonic_time(:millisecond) - t0
@@ -334,7 +343,7 @@ defmodule Xwa.Ingestion.IngestionWorker do
             "[Ingestion] Edge extraction failed for node #{inserted_node.id}: #{inspect(reason)}"
           )
 
-          :ok
+          {:ok, 0}
       end
     end
   end

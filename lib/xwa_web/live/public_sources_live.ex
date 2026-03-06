@@ -16,13 +16,14 @@ defmodule XwaWeb.PublicSourcesLive do
     {:ok,
      socket
      |> assign(:documents, documents)
-     |> assign(:page_title, "Sources")}
+     |> assign(:page_title, "Sources")
+     |> assign_new(:viewer, fn -> nil end)}
   end
 
   @impl true
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} current_scope={@current_scope} read_only={true}>
+    <Layouts.app flash={@flash} current_scope={@current_scope} read_only={true} viewer={@viewer}>
       <div class="max-w-3xl mx-auto py-8">
         <div class="mb-6 flex items-center justify-between">
           <div>
