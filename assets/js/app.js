@@ -1908,7 +1908,8 @@ function sigmaNodeColor(deg, maxDeg) {
 // high confidence = blue, mid = yellow, low = red
 function confidenceColor(confidence, min = 0, max = 1) {
   const range = max - min
-  const t = range > 0 ? Math.max(0, Math.min(1, (confidence - min) / range)) : 0.5
+  // Square-root stretch: spreads the clustered mid-range across more of the blue end
+  const t = Math.pow(range > 0 ? Math.max(0, Math.min(1, (confidence - min) / range)) : 0.5, 0.5)
   let r, g, b
   if (t > 0.5) {
     const f = (t - 0.5) / 0.5               // 0→1 across yellow→blue
