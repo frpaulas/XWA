@@ -153,17 +153,19 @@ const SigmaGraph = {
     }
     this.el.addEventListener("mousemove", this._onMouseMove)
 
-    // Deferred so LiveView has rendered the button
-    setTimeout(() => {
-      const expandBtn = document.getElementById("arc-expand-btn")
-      if (expandBtn) expandBtn.addEventListener("click", () => this._openArcModal())
-      const closeBtn = document.getElementById("arc-modal-close")
-      if (closeBtn) closeBtn.addEventListener("click", () => this._closeArcModal())
-      const modal = document.getElementById("arc-modal")
-      if (modal) modal.addEventListener("click", (e) => {
-        if (e.target === modal) this._closeArcModal()
-      })
-    }, 0)
+    // Event delegation for expand button — works even when button is conditionally rendered by LiveView
+    this._onDocClick = (e) => {
+      if (e.target.closest("#arc-expand-btn")) this._openArcModal()
+    }
+    document.addEventListener("click", this._onDocClick)
+
+    // Modal close listeners (modal is always in DOM, so direct binding is fine)
+    const closeBtn = document.getElementById("arc-modal-close")
+    if (closeBtn) closeBtn.addEventListener("click", () => this._closeArcModal())
+    const modal = document.getElementById("arc-modal")
+    if (modal) modal.addEventListener("click", (e) => {
+      if (e.target === modal) this._closeArcModal()
+    })
 
     this._onKeyDown = (e) => {
       if (e.key === "Escape") this._closeArcModal()
@@ -284,13 +286,6 @@ const SigmaGraph = {
   // #cy-saves-list is in normal LiveView-managed DOM and gets reset by patches.
   updated() {
     this._renderSavedViewsPanel()
-    // Re-attach expand button listener — the button is conditionally rendered by LiveView
-    // so each server update may create a new DOM element.
-    const expandBtn = document.getElementById("arc-expand-btn")
-    if (expandBtn && !expandBtn._arcListenerAttached) {
-      expandBtn._arcListenerAttached = true
-      expandBtn.addEventListener("click", () => this._openArcModal())
-    }
   },
 
   destroyed() {
@@ -302,6 +297,7 @@ const SigmaGraph = {
     if (this._onBoxMove)     document.removeEventListener("mousemove",  this._onBoxMove)
     if (this._onBoxUp)       document.removeEventListener("mouseup",    this._onBoxUp)
     if (this._onKeyDown)     document.removeEventListener("keydown",    this._onKeyDown)
+    if (this._onDocClick)    document.removeEventListener("click",     this._onDocClick)
     this._destroySigma()
   },
 

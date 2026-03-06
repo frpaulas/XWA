@@ -1312,7 +1312,10 @@ defmodule XwaWeb.GraphLive do
                 <div>
                   <p class="text-xs font-medium text-base-content/50 mb-1">Asserted</p>
                   <p class="text-xs text-base-content/60">
-                    {Calendar.strftime(@selected_node.asserted_at, "%b %-d, %Y")}
+                    {case Date.from_iso8601(@selected_node.asserted_at) do
+                      {:ok, d} -> Calendar.strftime(d, "%b %-d, %Y")
+                      _ -> @selected_node.asserted_at
+                    end}
                   </p>
                 </div>
               <% end %>
