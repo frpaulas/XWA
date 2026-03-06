@@ -1904,24 +1904,26 @@ function sigmaNodeColor(deg, maxDeg) {
   return hslToHex(214, 80, lightness)
 }
 
-// Confidence color: blue (#1e40af) → yellow (#fbbf24) → red (#dc2626)
-// high confidence = blue, mid = yellow, low = red
+// Confidence color: 4-stop ramp with sqrt stretch
+//   red (#dc2626) → yellow (#fbbf24) → cyan (#06b6d4) → blue (#1e40af)
+// Cyan waypoint prevents the grey zone that RGB yellow→blue interpolation produces.
+const _CONF_RAMP = [
+  [0xdc, 0x26, 0x26], // #dc2626  red    (low)
+  [0xfb, 0xbf, 0x24], // #fbbf24  yellow (mid)
+  [0x06, 0xb6, 0xd4], // #06b6d4  cyan
+  [0x1e, 0x40, 0xaf], // #1e40af  blue   (high)
+]
 function confidenceColor(confidence, min = 0, max = 1) {
+  const raw = range => Math.max(0, Math.min(1, (confidence - min) / range))
   const range = max - min
-  // Square-root stretch: spreads the clustered mid-range across more of the blue end
-  const t = Math.pow(range > 0 ? Math.max(0, Math.min(1, (confidence - min) / range)) : 0.5, 0.5)
-  let r, g, b
-  if (t > 0.5) {
-    const f = (t - 0.5) / 0.5               // 0→1 across yellow→blue
-    r = Math.round(0xfb + (0x1e - 0xfb) * f)
-    g = Math.round(0xbf + (0x40 - 0xbf) * f)
-    b = Math.round(0x24 + (0xaf - 0x24) * f)
-  } else {
-    const f = t / 0.5                        // 0→1 across red→yellow
-    r = Math.round(0xdc + (0xfb - 0xdc) * f)
-    g = Math.round(0x26 + (0xbf - 0x26) * f)
-    b = Math.round(0x26 + (0x24 - 0x26) * f)
-  }
+  // Square-root stretch pushes clustered mid values toward the blue end
+  const t = Math.pow(range > 0 ? raw(range) : 0.5, 0.5)
+  const pos = t * (_CONF_RAMP.length - 1)
+  const lo = Math.floor(pos), hi = Math.min(lo + 1, _CONF_RAMP.length - 1)
+  const f = pos - lo
+  const r = Math.round(_CONF_RAMP[lo][0] + (_CONF_RAMP[hi][0] - _CONF_RAMP[lo][0]) * f)
+  const g = Math.round(_CONF_RAMP[lo][1] + (_CONF_RAMP[hi][1] - _CONF_RAMP[lo][1]) * f)
+  const b = Math.round(_CONF_RAMP[lo][2] + (_CONF_RAMP[hi][2] - _CONF_RAMP[lo][2]) * f)
   return `#${r.toString(16).padStart(2, "0")}${g.toString(16).padStart(2, "0")}${b.toString(16).padStart(2, "0")}`
 }
 
