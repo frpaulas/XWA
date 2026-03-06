@@ -30,8 +30,7 @@ import Sigma from "sigma"
 import forceAtlas2 from "graphology-layout-forceatlas2"
 import { createNodePiechartProgram } from "@sigma/node-piechart"
 import { NodeCircleProgram } from "sigma/rendering"
-import { scalePoint, scaleSequential, scaleLinear } from "d3-scale"
-import { interpolateRdYlBu } from "d3-scale-chromatic"
+import { scalePoint } from "d3-scale"
 import { path as d3path } from "d3-path"
 
 // Synthesis node renderer: two equal slices, one per constituent graph.
@@ -593,8 +592,6 @@ const SigmaGraph = {
       .range([topPad, svgH - topPad])
       .padding(0)
 
-    // Red → Yellow → Blue across observed confidence range [0.65, 1.0]
-    const colorScale = scaleSequential(interpolateRdYlBu).domain([0.65, 1.0])
 
     // Convenience: y position by node id
     const yPos = {}
@@ -660,7 +657,7 @@ const SigmaGraph = {
     nodes.forEach(n => {
       const y = yPos[n.id]
       const r = n.isCenter ? 9 : 6
-      const color = colorScale(n.confidence)
+      const color = confidenceColor(n.confidence)
       const g = document.createElementNS(ns, "g")
       g.style.cursor = "pointer"
       g.addEventListener("click", () => {
@@ -1902,11 +1899,12 @@ function sigmaNodeColor(deg, maxDeg) {
 // Confidence-based node color: normalize within observed range [0.65, 1.0],
 // split into three equal bands: red (low) → yellow (mid) → blue (high).
 function confidenceColor(confidence) {
-  const MIN = 0.65, MAX = 1.0
-  const norm = Math.max(0, Math.min(1, (confidence - MIN) / (MAX - MIN)))
-  if (norm < 1 / 3) return "#f87171"  // red-400
-  if (norm < 2 / 3) return "#fbbf24"  // amber-400
-  return "#60a5fa"                     // blue-400
+  // Red (#ef4444) → Blue (#3b82f6), normalized over [0, 1]
+  const t = Math.max(0, Math.min(1, confidence ?? 0))
+  const r = Math.round(239 + (59  - 239) * t)
+  const g = Math.round(68  + (130 - 68)  * t)
+  const b = Math.round(68  + (246 - 68)  * t)
+  return `#${r.toString(16).padStart(2, "0")}${g.toString(16).padStart(2, "0")}${b.toString(16).padStart(2, "0")}`
 }
 
 // Force any CSS color string (including oklch, hsl) to a hex value by
