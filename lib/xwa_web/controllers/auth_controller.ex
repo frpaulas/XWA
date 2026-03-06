@@ -29,11 +29,20 @@ defmodule XwaWeb.AuthController do
   def callback(%{assigns: %{ueberauth_auth: auth}} = conn, _params) do
     case Accounts.find_or_create_from_oauth(auth) do
       {:ok, user} ->
-        conn
-        |> put_session(:user_id, user.id)
-        |> configure_session(renew: true)
-        |> put_flash(:info, "Welcome, #{user.name || user.email}!")
-        |> redirect(to: ~p"/")
+        conn =
+          conn
+          |> put_session(:user_id, user.id)
+          |> configure_session(renew: true)
+
+        if is_nil(user.username) do
+          conn
+          |> put_flash(:info, "Welcome! Please choose a username to continue.")
+          |> redirect(to: ~p"/account/setup")
+        else
+          conn
+          |> put_flash(:info, "Welcome, #{user.name || user.email}!")
+          |> redirect(to: ~p"/")
+        end
 
       {:error, _changeset} ->
         conn

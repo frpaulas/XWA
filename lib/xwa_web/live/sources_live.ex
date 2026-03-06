@@ -35,6 +35,7 @@ defmodule XwaWeb.SourcesLive do
     socket =
       socket
       |> assign(:documents, documents)
+      |> assign(:progress, %{})
       |> assign(:show_upload_panel, false)
       |> assign(:panel_mode, :upload)
       |> assign(:upload_step, :file)
@@ -320,11 +321,16 @@ defmodule XwaWeb.SourcesLive do
   end
 
   @impl true
-  def handle_info({event, _document_id}, socket)
+  def handle_info({event, document_id}, socket)
       when event in [:ingestion_complete, :ingestion_failed] do
     graph_id = socket.assigns.current_scope.graph_id
     documents = if graph_id, do: Documents.list_documents_for_graph(graph_id), else: []
-    {:noreply, assign(socket, :documents, documents)}
+    progress = Map.delete(socket.assigns.progress, document_id)
+    {:noreply, assign(socket, documents: documents, progress: progress)}
+  end
+
+  def handle_info({:ingestion_progress, document_id, stats}, socket) do
+    {:noreply, assign(socket, :progress, Map.put(socket.assigns.progress, document_id, stats))}
   end
 
   def handle_info(_msg, socket), do: {:noreply, socket}
@@ -452,6 +458,16 @@ defmodule XwaWeb.SourcesLive do
                           ]}>
                             {doc.ingestion_status}
                           </span>
+                          <%= if doc.ingestion_status == "processing" do %>
+                            <%= case Map.get(@progress, doc.id) do %>
+                              <% %{claims: c, edges: e} when c > 0 -> %>
+                                <span class="text-xs text-base-content/50 tabular-nums">
+                                  {c} claims · {e} edges
+                                </span>
+                              <% _ -> %>
+                                <span class="text-xs text-base-content/35 italic">extracting…</span>
+                            <% end %>
+                          <% end %>
                           <%= if doc.ingestion_status in ["failed", "processing"] do %>
                             <button
                               phx-click="retry_ingestion"

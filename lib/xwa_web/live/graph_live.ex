@@ -34,6 +34,8 @@ defmodule XwaWeb.GraphLive do
       |> assign(:explore_slider, 50)
       |> assign(:explore_loading, false)
       |> assign(:doc_modal, nil)
+      |> assign(:settings_open, false)
+      |> assign(:settings_error, nil)
       |> assign_new(:read_only, fn -> false end)
 
     {:ok, socket}
@@ -215,6 +217,47 @@ defmodule XwaWeb.GraphLive do
 
   def handle_event("close_doc_modal", _params, socket) do
     {:noreply, assign(socket, doc_modal: nil)}
+  end
+
+  def handle_event("open_settings", _params, socket) do
+    graph = socket.assigns.current_scope.graph
+    {:noreply,
+     socket
+     |> assign(:settings_open, true)
+     |> assign(:settings_error, nil)
+     |> assign(:settings_name, (graph && graph.name) || "")
+     |> assign(:settings_public, (graph && Map.get(graph, :public, false)) || false)}
+  end
+
+  def handle_event("close_settings", _params, socket) do
+    {:noreply, assign(socket, settings_open: false, settings_error: nil)}
+  end
+
+
+  def handle_event("save_settings", %{"name" => name, "public" => public_str}, socket) do
+    graph = socket.assigns.current_scope.graph
+    public = public_str == "true"
+
+    case graph && Graphs.update_graph_settings(graph, %{name: name, public: public}) do
+      {:ok, updated_graph} ->
+        updated_scope =
+          socket.assigns.current_scope
+          |> Map.put(:graph, updated_graph)
+
+        {:noreply,
+         socket
+         |> assign(:current_scope, updated_scope)
+         |> assign(:settings_open, false)
+         |> assign(:settings_error, nil)
+         |> put_flash(:info, "Graph settings saved.")}
+
+      {:error, changeset} ->
+        error = changeset.errors |> Enum.map_join(", ", fn {f, {m, _}} -> "#{f} #{m}" end)
+        {:noreply, assign(socket, settings_error: error)}
+
+      nil ->
+        {:noreply, put_flash(socket, :error, "No active graph.")}
+    end
   end
 
   @impl true
@@ -679,7 +722,7 @@ defmodule XwaWeb.GraphLive do
     assigns = assign(assigns, :node_types, node_types(assigns.nodes))
 
     ~H"""
-    <Layouts.app flash={@flash} current_scope={@current_scope}>
+    <Layouts.app flash={@flash} current_scope={@current_scope} read_only={@read_only}>
       <div class="flex -mx-4 -my-8 overflow-hidden" style="height: calc(100vh - 4rem)">
 
         <%!-- Left sidebar: focus/explore + filters --%>
@@ -1044,6 +1087,18 @@ defmodule XwaWeb.GraphLive do
             <%!-- Explored node labels — clickable back buttons; current node shows full summary --%>
             <div id="cy-explored-labels" class="flex flex-col gap-1"></div>
           </div>
+          <%!-- Graph settings button — owner only, top-right corner --%>
+          <%= if !@read_only && @current_scope.role == "owner" do %>
+            <div class="absolute top-3 right-3 z-20">
+              <button
+                phx-click="open_settings"
+                class="flex items-center gap-1.5 rounded-lg bg-base-100/80 backdrop-blur-sm border border-base-200 px-2.5 py-1.5 text-xs text-base-content/60 hover:text-base-content hover:border-base-300 shadow-sm transition-colors"
+                title="Graph settings"
+              >
+                <.icon name="hero-cog-6-tooth" class="w-3.5 h-3.5" /> Settings
+              </button>
+            </div>
+          <% end %>
           <%!-- Canvas: always in DOM so LiveView patches rather than replaces it --%>
           <div
             id="cy"
@@ -1327,6 +1382,55 @@ defmodule XwaWeb.GraphLive do
         </div>
 
       </div>
+
+      <%!-- Graph settings modal — owner only --%>
+      <%= if @settings_open do %>
+        <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
+          <div class="bg-base-100 rounded-2xl shadow-xl w-full max-w-sm mx-4 p-6">
+            <div class="flex items-center justify-between mb-5">
+              <h2 class="text-lg font-semibold text-base-content">Graph Settings</h2>
+              <button phx-click="close_settings" class="text-base-content/40 hover:text-base-content transition-colors">
+                <.icon name="hero-x-mark" class="w-5 h-5" />
+              </button>
+            </div>
+
+            <%= if @settings_error do %>
+              <div class="mb-4 rounded-lg bg-error/10 border border-error/30 px-4 py-3 text-sm text-error">
+                {@settings_error}
+              </div>
+            <% end %>
+
+            <form phx-submit="save_settings" class="flex flex-col gap-4">
+              <div>
+                <label class="block text-sm font-medium text-base-content mb-1">Name</label>
+                <input
+                  type="text"
+                  name="name"
+                  value={@settings_name}
+                  placeholder="My Graph"
+                  class="input input-bordered w-full"
+                  maxlength="120"
+                  required
+                />
+              </div>
+
+              <div>
+                <label class="block text-sm font-medium text-base-content mb-1">Visibility</label>
+                <select name="public" class="select select-bordered w-full">
+                  <option value="false" selected={!@settings_public}>Private — only you can see this graph</option>
+                  <option value="true" selected={@settings_public}>Public — visible to anyone at /graphs/username/slug</option>
+                </select>
+                <p class="mt-1.5 text-xs text-base-content/40">Name is required before making a graph public.</p>
+              </div>
+
+              <div class="flex gap-2 pt-2">
+                <button type="button" phx-click="close_settings" class="btn btn-ghost flex-1">Cancel</button>
+                <button type="submit" class="btn btn-primary flex-1">Save</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      <% end %>
     </Layouts.app>
     """
   end

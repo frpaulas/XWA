@@ -38,6 +38,20 @@ defmodule XwaWeb.Layouts do
 
             <%!-- Desktop nav links --%>
             <nav class="hidden sm:flex items-center gap-1 flex-1">
+              <.link
+                navigate={~p"/graphs"}
+                class="flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm font-medium text-base-content/60 hover:text-base-content hover:bg-base-200 transition-colors"
+              >
+                <.icon name="hero-globe-alt" class="w-4 h-4" /> Graphs
+              </.link>
+              <%= if @read_only && @current_scope && @current_scope.graph && @current_scope.graph.slug do %>
+                <.link
+                  navigate={"/graphs/#{@current_scope.user.username}/#{@current_scope.graph.slug}/sources"}
+                  class="flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm font-medium text-base-content/60 hover:text-base-content hover:bg-base-200 transition-colors"
+                >
+                  <.icon name="hero-circle-stack" class="w-4 h-4" /> Sources
+                </.link>
+              <% end %>
               <%= if !@read_only do %>
                 <.link
                   navigate={~p"/sources"}
@@ -45,13 +59,13 @@ defmodule XwaWeb.Layouts do
                 >
                   <.icon name="hero-circle-stack" class="w-4 h-4" /> Sources
                 </.link>
+                <.link
+                  navigate={~p"/graph"}
+                  class="flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm font-medium text-base-content/60 hover:text-base-content hover:bg-base-200 transition-colors"
+                >
+                  <.icon name="hero-share" class="w-4 h-4" /> Reset graph
+                </.link>
               <% end %>
-              <.link
-                navigate={if @read_only, do: ~p"/demo", else: ~p"/graph"}
-                class="flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm font-medium text-base-content/60 hover:text-base-content hover:bg-base-200 transition-colors"
-              >
-                <.icon name="hero-share" class="w-4 h-4" /> Reset graph
-              </.link>
               <.graph_switcher current_scope={@current_scope} />
               <%= if @current_scope && @current_scope.user.role == "admin" do %>
                 <.link
@@ -215,11 +229,27 @@ defmodule XwaWeb.Layouts do
         >
           <div class="mx-auto max-w-7xl px-4 py-3 flex flex-col gap-1">
             <.link
-              navigate={~p"/sources"}
+              navigate={~p"/graphs"}
               class="flex items-center gap-2 rounded-lg px-3 py-2.5 text-sm font-medium text-base-content/70 hover:text-base-content hover:bg-base-200 transition-colors"
             >
-              <.icon name="hero-circle-stack" class="w-4 h-4" /> Sources
+              <.icon name="hero-globe-alt" class="w-4 h-4" /> Graphs
             </.link>
+            <%= if @read_only && @current_scope && @current_scope.graph && @current_scope.graph.slug do %>
+              <.link
+                navigate={"/graphs/#{@current_scope.user.username}/#{@current_scope.graph.slug}/sources"}
+                class="flex items-center gap-2 rounded-lg px-3 py-2.5 text-sm font-medium text-base-content/70 hover:text-base-content hover:bg-base-200 transition-colors"
+              >
+                <.icon name="hero-circle-stack" class="w-4 h-4" /> Sources
+              </.link>
+            <% end %>
+            <%= if !@read_only do %>
+              <.link
+                navigate={~p"/sources"}
+                class="flex items-center gap-2 rounded-lg px-3 py-2.5 text-sm font-medium text-base-content/70 hover:text-base-content hover:bg-base-200 transition-colors"
+              >
+                <.icon name="hero-circle-stack" class="w-4 h-4" /> Sources
+              </.link>
+            <% end %>
             <.link
               navigate={~p"/graph"}
               class="flex items-center gap-2 rounded-lg px-3 py-2.5 text-sm font-medium text-base-content/70 hover:text-base-content hover:bg-base-200 transition-colors"

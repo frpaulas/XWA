@@ -83,6 +83,64 @@ defmodule Xwa.Graphs do
   def get_graph!(id), do: Repo.get!(Graph, id)
 
   @doc """
+  Returns all public graphs with their owner's username, for the directory page.
+  """
+  @spec list_public_graphs() :: [map()]
+  def list_public_graphs do
+    Repo.all(
+      from g in Graph,
+        join: m in GraphMembership,
+        on: m.graph_id == g.id and m.role == "owner",
+        join: u in Xwa.Accounts.User,
+        on: u.id == m.user_id,
+        where: g.public == true and not is_nil(g.slug) and not is_nil(u.username),
+        order_by: [asc: g.inserted_at],
+        select: %{
+          id: g.id,
+          name: g.name,
+          slug: g.slug,
+          description: g.description,
+          username: u.username,
+          inserted_at: g.inserted_at
+        }
+    )
+  end
+
+  @doc """
+  Returns a public graph by owner username and slug, or nil.
+  """
+  @spec get_public_graph_by_slug(String.t(), String.t()) :: map() | nil
+  def get_public_graph_by_slug(username, slug) do
+    Repo.one(
+      from g in Graph,
+        join: m in GraphMembership,
+        on: m.graph_id == g.id and m.role == "owner",
+        join: u in Xwa.Accounts.User,
+        on: u.id == m.user_id,
+        where: u.username == ^username and g.slug == ^slug and g.public == true,
+        select: %{
+          id: g.id,
+          name: g.name,
+          slug: g.slug,
+          description: g.description,
+          username: u.username,
+          owner_id: u.id
+        }
+    )
+  end
+
+  @doc """
+  Updates a graph's settings (name, description, public visibility).
+  Returns `{:ok, graph}` or `{:error, changeset}`.
+  """
+  @spec update_graph_settings(Graph.t(), map()) :: {:ok, Graph.t()} | {:error, Ecto.Changeset.t()}
+  def update_graph_settings(graph, attrs) do
+    graph
+    |> Graph.settings_changeset(attrs)
+    |> Repo.update()
+  end
+
+  @doc """
   Returns all graphs in the system with their owner user preloaded.
   Used by admin UI to select a target graph for document import.
   """

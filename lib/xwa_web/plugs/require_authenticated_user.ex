@@ -29,15 +29,23 @@ defmodule XwaWeb.Plugs.RequireAuthenticatedUser do
   def on_mount(:require_authenticated, _params, session, socket) do
     socket = mount_current_scope(socket, session)
 
-    if socket.assigns.current_scope do
-      {:cont, socket}
-    else
-      socket =
-        socket
-        |> Phoenix.LiveView.put_flash(:error, "You must be signed in to access that page.")
-        |> Phoenix.LiveView.redirect(to: ~p"/")
+    cond do
+      is_nil(socket.assigns.current_scope) ->
+        socket =
+          socket
+          |> Phoenix.LiveView.put_flash(:error, "You must be signed in to access that page.")
+          |> Phoenix.LiveView.redirect(to: ~p"/")
+        {:halt, socket}
 
-      {:halt, socket}
+      is_nil(socket.assigns.current_scope.user.username) ->
+        socket =
+          socket
+          |> Phoenix.LiveView.put_flash(:info, "Please choose a username to continue.")
+          |> Phoenix.LiveView.redirect(to: ~p"/account/setup")
+        {:halt, socket}
+
+      true ->
+        {:cont, socket}
     end
   end
 

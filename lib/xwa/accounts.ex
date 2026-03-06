@@ -46,6 +46,17 @@ defmodule Xwa.Accounts do
     Repo.get_by(User, username: username, provider: "local")
   end
 
+  @doc """
+  Sets (or updates) a username on a user. Used for OAuth users choosing a username post-signup.
+  Returns `{:ok, user}` or `{:error, changeset}`.
+  """
+  @spec set_username(User.t(), String.t()) :: {:ok, User.t()} | {:error, Ecto.Changeset.t()}
+  def set_username(%User{} = user, username) do
+    user
+    |> User.username_changeset(%{username: username})
+    |> Repo.update()
+  end
+
   # ---------------------------------------------------------------------------
   # Local auth
   # ---------------------------------------------------------------------------

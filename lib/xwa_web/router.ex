@@ -42,7 +42,24 @@ defmodule XwaWeb.Router do
       live "/admin/upload", AdminUploadLive
     end
 
-    # Public read-only demos — each loads a specific user's graph without auth.
+    # Account setup for OAuth users who need to pick a username
+    live_session :account_setup do
+      live "/account/setup", AccountSetupLive
+    end
+
+    # Public graph directory (no auth required)
+    live_session :public_directory do
+      live "/graphs", GraphDirectoryLive
+    end
+
+    # Public read-only graph views — loaded by username + slug
+    live_session :public_graph,
+      on_mount: {XwaWeb.PublicGraphMount, :load} do
+      live "/graphs/:username/:slug", GraphLive
+      live "/graphs/:username/:slug/sources", PublicSourcesLive
+    end
+
+    # Legacy public read-only demos — each loads a specific user's graph without auth.
     live_session :demo1,
       on_mount: {XwaWeb.DemoMount, :demo1} do
       live "/demo1", GraphLive

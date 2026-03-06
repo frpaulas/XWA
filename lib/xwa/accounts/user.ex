@@ -56,6 +56,20 @@ defmodule Xwa.Accounts.User do
     |> put_password_hash()
   end
 
+  @doc """
+  Changeset for setting or updating a username on an existing user (e.g. after OAuth signup).
+  """
+  def username_changeset(user, attrs) do
+    user
+    |> cast(attrs, [:username])
+    |> validate_required([:username])
+    |> validate_length(:username, min: 2, max: 40)
+    |> validate_format(:username, ~r/^[a-zA-Z0-9_-]+$/,
+      message: "can only contain letters, numbers, hyphens, and underscores"
+    )
+    |> unique_constraint(:username)
+  end
+
   defp put_password_hash(%Ecto.Changeset{valid?: true, changes: %{password: pw}} = cs) do
     put_change(cs, :password_hash, Bcrypt.hash_pwd_salt(pw))
   end
