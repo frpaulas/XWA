@@ -1756,8 +1756,14 @@ const SigmaGraph = {
       slice_b: attrs.slice_b,
       hidden: false,
       label: labelText,
-      // Degree-based zIndex 0–10; trail=20, selected/hover=30 always on top.
-      zIndex: Math.round((this.graph.degree(id) / Math.max(this._maxDegree, 1)) * 10),
+      // Low-confidence nodes render on top (zIndex 10); high-confidence at bottom (0).
+      // trail=20, selected/hover=30–50 always win.
+      zIndex: (() => {
+        const c = attrs.confidence ?? 1.0
+        const r = (this._confMax ?? 1) - (this._confMin ?? 0)
+        const norm = r > 0 ? Math.max(0, Math.min(1, (c - (this._confMin ?? 0)) / r)) : 0.5
+        return Math.round((1 - norm) * 10)
+      })(),
     }
 
     // Degree filter
