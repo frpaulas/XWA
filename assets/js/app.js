@@ -1904,26 +1904,23 @@ function sigmaNodeColor(deg, maxDeg) {
   return hslToHex(214, 80, lightness)
 }
 
-// Confidence color — 6-stop ramp, evenly spaced over [0,1]:
-//   low  → deep red  → light red  → pale yellow → bright yellow → light blue → dark blue ← high
-//   0.0     0.2          0.4            0.6             0.8           1.0
-const _CONF_RAMP = [
-  [0x7f, 0x1d, 0x1d], // #7f1d1d  deep red      (lowest)
-  [0xfc, 0xa5, 0xa5], // #fca5a5  light red
-  [0xfe, 0xf0, 0x8a], // #fef08a  pale yellow
-  [0xfb, 0xbf, 0x24], // #fbbf24  bright yellow
-  [0x93, 0xc5, 0xfd], // #93c5fd  light blue
-  [0x1e, 0x3a, 0x8a], // #1e3a8a  dark blue     (highest)
-]
+// Confidence color: blue (#1e40af) → yellow (#fbbf24) → red (#dc2626)
+// high confidence = blue, mid = yellow, low = red
 function confidenceColor(confidence, min = 0, max = 1) {
   const range = max - min
   const t = range > 0 ? Math.max(0, Math.min(1, (confidence - min) / range)) : 0.5
-  const pos = t * (_CONF_RAMP.length - 1)
-  const lo = Math.floor(pos), hi = Math.min(lo + 1, _CONF_RAMP.length - 1)
-  const f = pos - lo
-  const r = Math.round(_CONF_RAMP[lo][0] + (_CONF_RAMP[hi][0] - _CONF_RAMP[lo][0]) * f)
-  const g = Math.round(_CONF_RAMP[lo][1] + (_CONF_RAMP[hi][1] - _CONF_RAMP[lo][1]) * f)
-  const b = Math.round(_CONF_RAMP[lo][2] + (_CONF_RAMP[hi][2] - _CONF_RAMP[lo][2]) * f)
+  let r, g, b
+  if (t > 0.5) {
+    const f = (t - 0.5) / 0.5               // 0→1 across yellow→blue
+    r = Math.round(0xfb + (0x1e - 0xfb) * f)
+    g = Math.round(0xbf + (0x40 - 0xbf) * f)
+    b = Math.round(0x24 + (0xaf - 0x24) * f)
+  } else {
+    const f = t / 0.5                        // 0→1 across red→yellow
+    r = Math.round(0xdc + (0xfb - 0xdc) * f)
+    g = Math.round(0x26 + (0xbf - 0x26) * f)
+    b = Math.round(0x26 + (0x24 - 0x26) * f)
+  }
   return `#${r.toString(16).padStart(2, "0")}${g.toString(16).padStart(2, "0")}${b.toString(16).padStart(2, "0")}`
 }
 
