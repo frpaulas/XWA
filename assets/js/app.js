@@ -343,6 +343,7 @@ const SigmaGraph = {
         this.sigma.refresh()
         this._updateStats()
         this._fitView()
+        this._clearArcDiagram()
       }
     } finally {
       this._applyingOverlay = false
@@ -381,7 +382,104 @@ const SigmaGraph = {
     this._renderExploredLabels()
     this.sigma.refresh()
     this._updateStats()
+    this._renderArcDiagram(centerId, hoodSet)
     setTimeout(() => this._fitToNodes(hoodSet), 50)
+  },
+
+  // Vertical arc diagram rendered into #arc-diagram in the sidebar.
+  // Nodes sorted by confidence descending (high confidence = top = blue).
+  // Arcs bow to the left; center node has a ring border.
+  _renderArcDiagram(centerId, hoodSet) {
+    const el = document.getElementById("arc-diagram")
+    if (!el || !this.graph) return
+
+    const allIds = Array.from(hoodSet)
+    const nodes = allIds.map(id => ({
+      id,
+      label: this.graph.getNodeAttribute(id, "label") || id,
+      confidence: this.graph.getNodeAttribute(id, "confidence") ?? 1.0,
+      color: confidenceColor(this.graph.getNodeAttribute(id, "confidence") ?? 1.0),
+      isCenter: id === centerId,
+    })).sort((a, b) => b.confidence - a.confidence || (a.isCenter ? -1 : 1))
+
+    const edges = []
+    this.graph.forEachEdge((eid, attrs, source, target) => {
+      if (hoodSet.has(source) && hoodSet.has(target)) {
+        edges.push({ source, target, certainty: attrs.certainty || "solid" })
+      }
+    })
+
+    const W = el.clientWidth || 272
+    const nodeSpacing = 28
+    const topPad = 14
+    const H = topPad * 2 + nodeSpacing * Math.max(nodes.length - 1, 0)
+    const spineX = 68
+    const ns = "http://www.w3.org/2000/svg"
+
+    const yPos = {}
+    nodes.forEach((n, i) => { yPos[n.id] = topPad + i * nodeSpacing })
+
+    const svg = document.createElementNS(ns, "svg")
+    svg.setAttribute("width", W)
+    svg.setAttribute("height", H)
+    svg.style.display = "block"
+
+    // Spine
+    const spine = document.createElementNS(ns, "line")
+    spine.setAttribute("x1", spineX); spine.setAttribute("y1", topPad)
+    spine.setAttribute("x2", spineX); spine.setAttribute("y2", H - topPad)
+    spine.setAttribute("stroke", "#d1d5db"); spine.setAttribute("stroke-width", "1")
+    svg.appendChild(spine)
+
+    // Arcs (bow left)
+    edges.forEach(e => {
+      const y1 = yPos[e.source], y2 = yPos[e.target]
+      if (y1 === undefined || y2 === undefined) return
+      const bow = Math.max(Math.abs(y2 - y1) * 0.45, 8)
+      const dashArr = e.certainty === "dashed" ? "4 2" : e.certainty === "dotted" ? "1 3" : "none"
+      const path = document.createElementNS(ns, "path")
+      path.setAttribute("d", `M ${spineX} ${y1} C ${spineX - bow} ${y1} ${spineX - bow} ${y2} ${spineX} ${y2}`)
+      path.setAttribute("fill", "none")
+      path.setAttribute("stroke", "#94a3b8")
+      path.setAttribute("stroke-width", "1.5")
+      path.setAttribute("stroke-dasharray", dashArr)
+      path.setAttribute("opacity", "0.55")
+      svg.appendChild(path)
+    })
+
+    // Nodes + labels
+    nodes.forEach(n => {
+      const y = yPos[n.id]
+      const r = n.isCenter ? 6 : 4
+      const g = document.createElementNS(ns, "g")
+      g.style.cursor = "pointer"
+      g.addEventListener("click", () => this.pushEvent("node_selected", { id: n.id }))
+
+      const circle = document.createElementNS(ns, "circle")
+      circle.setAttribute("cx", spineX); circle.setAttribute("cy", y)
+      circle.setAttribute("r", r); circle.setAttribute("fill", n.color)
+      if (n.isCenter) {
+        circle.setAttribute("stroke", "#1e40af"); circle.setAttribute("stroke-width", "2")
+      }
+      g.appendChild(circle)
+
+      const text = document.createElementNS(ns, "text")
+      text.setAttribute("x", spineX + r + 6); text.setAttribute("y", y + 4)
+      text.setAttribute("font-size", "10"); text.setAttribute("fill", "#6b7280")
+      text.setAttribute("font-family", "ui-sans-serif, system-ui, sans-serif")
+      text.textContent = n.label.length > 30 ? n.label.slice(0, 27) + "…" : n.label
+      g.appendChild(text)
+
+      svg.appendChild(g)
+    })
+
+    el.innerHTML = ""
+    el.appendChild(svg)
+  },
+
+  _clearArcDiagram() {
+    const el = document.getElementById("arc-diagram")
+    if (el) el.innerHTML = ""
   },
 
   // Restore a neighborhood overlay that was saved with a named view.
