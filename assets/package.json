@@ -2,9 +2,13 @@
   "dependencies": {
     "@sigma/node-image": "^3.0.0",
     "@sigma/node-piechart": "^3.0.0",
+    "d3-interpolate": "^3.0.1",
+    "d3-path": "^3.1.0",
+    "d3-scale": "^4.0.2",
+    "d3-scale-chromatic": "^3.1.0",
     "graphology": "^0.26.0",
     "graphology-layout": "^0.6.1",
-"graphology-layout-forceatlas2": "^0.10.1",
+    "graphology-layout-forceatlas2": "^0.10.1",
     "sigma": "^3.0.2"
   }
 }

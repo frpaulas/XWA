@@ -30,6 +30,9 @@ import Sigma from "sigma"
 import forceAtlas2 from "graphology-layout-forceatlas2"
 import { createNodePiechartProgram } from "@sigma/node-piechart"
 import { NodeCircleProgram } from "sigma/rendering"
+import { scalePoint, scaleSequential, scaleLinear } from "d3-scale"
+import { interpolateRdYlBu } from "d3-scale-chromatic"
+import { path as d3path } from "d3-path"
 
 // Synthesis node renderer: two equal slices, one per constituent graph.
 // Colors chosen to contrast with the blue regular-node palette.
@@ -150,6 +153,23 @@ const SigmaGraph = {
     }
     this.el.addEventListener("mousemove", this._onMouseMove)
 
+    // Deferred so LiveView has rendered the button
+    setTimeout(() => {
+      const expandBtn = document.getElementById("arc-expand-btn")
+      if (expandBtn) expandBtn.addEventListener("click", () => this._openArcModal())
+      const closeBtn = document.getElementById("arc-modal-close")
+      if (closeBtn) closeBtn.addEventListener("click", () => this._closeArcModal())
+      const modal = document.getElementById("arc-modal")
+      if (modal) modal.addEventListener("click", (e) => {
+        if (e.target === modal) this._closeArcModal()
+      })
+    }, 0)
+
+    this._onKeyDown = (e) => {
+      if (e.key === "Escape") this._closeArcModal()
+    }
+    document.addEventListener("keydown", this._onKeyDown)
+
     // Mount Sigma on a stable child div so LiveView re-renders don't destroy the canvas.
     this._container = document.createElement("div")
     this._container.style.cssText = "position:absolute;top:0;right:0;bottom:0;left:0;overflow:hidden;"
@@ -226,22 +246,6 @@ const SigmaGraph = {
       if (e.key === "Escape") this._hideSaveViewDialog()
     })
 
-    this.handleEvent("ad_toggled", ({expanded}) => {
-      // Dismiss tooltip and resize Sigma after LiveView has applied the new panel classes
-      this._highlightedNode = null
-      this._hoveredNeighbors = new Set()
-      this._hoveredEdges = new Set()
-      const tip = document.getElementById("node-tooltip")
-      if (tip) { tip.style.display = "none"; tip.innerHTML = "" }
-      if (this.sigma) this.sigma.refresh()
-      setTimeout(() => {
-        if (this.sigma) this.sigma.resize()
-        if (expanded && this._lastCenterId && this._lastHoodSet) {
-          this._renderArcDiagram(this._lastCenterId, this._lastHoodSet)
-        }
-      }, 50)
-    })
-
     this.handleEvent("neighborhood_changed", (neighborhood) => {
       this._pendingNeighborhood = neighborhood && neighborhood.center_id ? neighborhood : null
       this._pendingFocus = null
@@ -280,6 +284,13 @@ const SigmaGraph = {
   // #cy-saves-list is in normal LiveView-managed DOM and gets reset by patches.
   updated() {
     this._renderSavedViewsPanel()
+    // Re-attach expand button listener — the button is conditionally rendered by LiveView
+    // so each server update may create a new DOM element.
+    const expandBtn = document.getElementById("arc-expand-btn")
+    if (expandBtn && !expandBtn._arcListenerAttached) {
+      expandBtn._arcListenerAttached = true
+      expandBtn.addEventListener("click", () => this._openArcModal())
+    }
   },
 
   destroyed() {
@@ -290,6 +301,7 @@ const SigmaGraph = {
     if (this._onBoxKeyUp)    document.removeEventListener("keyup",      this._onBoxKeyUp)
     if (this._onBoxMove)     document.removeEventListener("mousemove",  this._onBoxMove)
     if (this._onBoxUp)       document.removeEventListener("mouseup",    this._onBoxUp)
+    if (this._onKeyDown)     document.removeEventListener("keydown",    this._onKeyDown)
     this._destroySigma()
   },
 
@@ -509,6 +521,181 @@ const SigmaGraph = {
   _clearArcDiagram() {
     const el = document.getElementById("arc-diagram")
     if (el) el.innerHTML = ""
+  },
+
+  _openArcModal() {
+    const modal = document.getElementById("arc-modal")
+    if (!modal || !this._lastCenterId || !this._lastHoodSet) return
+    modal.classList.remove("hidden")
+    modal.classList.add("flex")
+    // Re-attach close handler in case LiveView replaced the button
+    const closeBtn = document.getElementById("arc-modal-close")
+    if (closeBtn) closeBtn.onclick = () => this._closeArcModal()
+    this._renderD3ArcDiagram()
+  },
+
+  _closeArcModal() {
+    const modal = document.getElementById("arc-modal")
+    if (!modal) return
+    modal.classList.remove("flex")
+    modal.classList.add("hidden")
+    const body = document.getElementById("arc-modal-body")
+    if (body) body.innerHTML = ""
+  },
+
+  _renderD3ArcDiagram() {
+    const body = document.getElementById("arc-modal-body")
+    if (!body || !this.graph || !this._lastHoodSet || !this._lastCenterId) return
+    body.innerHTML = ""
+
+    const centerId = this._lastCenterId
+    const hoodSet = this._lastHoodSet
+
+    // Build node list sorted by confidence descending
+    const nodes = Array.from(hoodSet)
+      .filter(id => this.graph.hasNode(id))
+      .map(id => ({
+        id,
+        label: this.graph.getNodeAttribute(id, "label") || id,
+        confidence: this.graph.getNodeAttribute(id, "confidence") ?? 1.0,
+        isCenter: id === centerId,
+      }))
+      .sort((a, b) => b.confidence - a.confidence)
+
+    // Build edge list within the hood
+    const edges = []
+    this.graph.forEachEdge((eid, attrs, source, target) => {
+      if (hoodSet.has(source) && hoodSet.has(target)) {
+        edges.push({
+          source,
+          target,
+          certainty: attrs.certainty || "solid",
+          label: attrs.label || "",
+        })
+      }
+    })
+
+    // Layout constants
+    const nodeSpacing = 52
+    const topPad = 32
+    const svgH = topPad * 2 + nodeSpacing * Math.max(nodes.length - 1, 0)
+    const svgW = body.clientWidth || 800
+    const spineX = Math.round(svgW * 0.22)
+    const ns = "http://www.w3.org/2000/svg"
+
+    // D3 scales
+    const yScale = scalePoint()
+      .domain(nodes.map(n => n.id))
+      .range([topPad, svgH - topPad])
+      .padding(0)
+
+    // Red → Yellow → Blue across observed confidence range [0.65, 1.0]
+    const colorScale = scaleSequential(interpolateRdYlBu).domain([0.65, 1.0])
+
+    // Convenience: y position by node id
+    const yPos = {}
+    nodes.forEach(n => { yPos[n.id] = yScale(n.id) })
+
+    // Create SVG
+    const svg = document.createElementNS(ns, "svg")
+    svg.setAttribute("width", svgW)
+    svg.setAttribute("height", svgH)
+    svg.style.display = "block"
+
+    // Spine
+    const spine = document.createElementNS(ns, "line")
+    spine.setAttribute("x1", spineX); spine.setAttribute("y1", topPad)
+    spine.setAttribute("x2", spineX); spine.setAttribute("y2", svgH - topPad)
+    spine.setAttribute("stroke", "#e2e8f0"); spine.setAttribute("stroke-width", "1")
+    svg.appendChild(spine)
+
+    // Arcs + edge labels
+    edges.forEach(e => {
+      const y1 = yPos[e.source], y2 = yPos[e.target]
+      if (y1 === undefined || y2 === undefined) return
+      const span = Math.abs(y2 - y1)
+      const bow = Math.max(span * 0.42, 14)
+      const mx = spineX - bow          // control point x
+      const my = (y1 + y2) / 2        // midpoint y
+
+      // Arc path using d3-path
+      const p = d3path()
+      p.moveTo(spineX, y1)
+      p.bezierCurveTo(mx, y1, mx, y2, spineX, y2)
+
+      const dashArr = e.certainty === "dashed" ? "6 3" : e.certainty === "dotted" ? "2 4" : null
+      const arcEl = document.createElementNS(ns, "path")
+      arcEl.setAttribute("d", p.toString())
+      arcEl.setAttribute("fill", "none")
+      arcEl.setAttribute("stroke", "#94a3b8")
+      arcEl.setAttribute("stroke-width", "1.5")
+      arcEl.setAttribute("opacity", "0.5")
+      if (dashArr) arcEl.setAttribute("stroke-dasharray", dashArr)
+      svg.appendChild(arcEl)
+
+      // Edge label at arc midpoint (left of spine)
+      if (e.label) {
+        const maxLabelLen = 28
+        const labelText = e.label.length > maxLabelLen ? e.label.slice(0, maxLabelLen - 1) + "…" : e.label
+        const lbl = document.createElementNS(ns, "text")
+        lbl.setAttribute("x", mx - 6)
+        lbl.setAttribute("y", my)
+        lbl.setAttribute("text-anchor", "end")
+        lbl.setAttribute("dominant-baseline", "middle")
+        lbl.setAttribute("font-size", "10")
+        lbl.setAttribute("fill", "#94a3b8")
+        lbl.setAttribute("font-family", "ui-sans-serif, system-ui, sans-serif")
+        lbl.textContent = labelText
+        svg.appendChild(lbl)
+      }
+    })
+
+    // Nodes + labels
+    nodes.forEach(n => {
+      const y = yPos[n.id]
+      const r = n.isCenter ? 9 : 6
+      const color = colorScale(n.confidence)
+      const g = document.createElementNS(ns, "g")
+      g.style.cursor = "pointer"
+      g.addEventListener("click", () => {
+        this._closeArcModal()
+        this.pushEvent("node_selected", { id: n.id })
+      })
+
+      // Circle
+      const circle = document.createElementNS(ns, "circle")
+      circle.setAttribute("cx", spineX); circle.setAttribute("cy", y)
+      circle.setAttribute("r", r); circle.setAttribute("fill", color)
+      if (n.isCenter) {
+        circle.setAttribute("stroke", "#1e40af"); circle.setAttribute("stroke-width", "2.5")
+      }
+      g.appendChild(circle)
+
+      // Node label (right of spine)
+      const text = document.createElementNS(ns, "text")
+      text.setAttribute("x", spineX + r + 10); text.setAttribute("y", y)
+      text.setAttribute("dominant-baseline", "middle")
+      text.setAttribute("font-size", "13")
+      text.setAttribute("fill", "#374151")
+      text.setAttribute("font-family", "ui-sans-serif, system-ui, sans-serif")
+      text.textContent = n.label
+      g.appendChild(text)
+
+      // Confidence score (left of spine)
+      const conf = document.createElementNS(ns, "text")
+      conf.setAttribute("x", spineX - r - 8); conf.setAttribute("y", y)
+      conf.setAttribute("text-anchor", "end")
+      conf.setAttribute("dominant-baseline", "middle")
+      conf.setAttribute("font-size", "10")
+      conf.setAttribute("fill", "#94a3b8")
+      conf.setAttribute("font-family", "ui-sans-serif, system-ui, sans-serif")
+      conf.textContent = Math.round(n.confidence * 100) + "%"
+      g.appendChild(conf)
+
+      svg.appendChild(g)
+    })
+
+    body.appendChild(svg)
   },
 
   // Restore a neighborhood overlay that was saved with a named view.
