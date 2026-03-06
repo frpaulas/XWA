@@ -1454,16 +1454,25 @@ const SigmaGraph = {
     if (!isFinite(minX)) { minX = 0; maxX = 0; minY = 0; maxY = 0 }
 
     const cx = (minX + maxX) / 2
-    const cy = (minY + maxY) / 2
-    // Ring radius: just outside the bounding circle of the connected component.
+    // Place isolated nodes in a compact grid below the main component.
     const halfDiag = Math.hypot(maxX - minX, maxY - minY) / 2
-    const radius = Math.max(halfDiag * 1.7, 200)
-    const angleStep = (2 * Math.PI) / isolated.length
+    const spacing = Math.max(60, halfDiag * 0.12)
+    const cols = Math.max(1, Math.ceil(Math.sqrt(isolated.length * 2)))  // wider than tall
+    const clusterTop = maxY + Math.max(halfDiag * 0.5, 150)
+
+    // Sort by confidence ascending so red nodes are top-left
+    isolated.sort((a, b) => {
+      const ca = this.graph.getNodeAttribute(a, "confidence") ?? 1.0
+      const cb = this.graph.getNodeAttribute(b, "confidence") ?? 1.0
+      return ca - cb
+    })
 
     isolated.forEach((id, i) => {
-      const angle = i * angleStep - Math.PI / 2   // start from top
-      this.graph.setNodeAttribute(id, "x", cx + radius * Math.cos(angle))
-      this.graph.setNodeAttribute(id, "y", cy + radius * Math.sin(angle))
+      const col = i % cols
+      const row = Math.floor(i / cols)
+      const rowCount = Math.ceil(isolated.length / cols)
+      this.graph.setNodeAttribute(id, "x", cx + (col - (cols - 1) / 2) * spacing)
+      this.graph.setNodeAttribute(id, "y", clusterTop + (row - (rowCount - 1) / 2) * spacing)
     })
   },
 
