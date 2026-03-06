@@ -428,7 +428,7 @@ const SigmaGraph = {
       id,
       label: this.graph.getNodeAttribute(id, "label") || id,
       confidence: this.graph.getNodeAttribute(id, "confidence") ?? 1.0,
-      color: confidenceColor(this.graph.getNodeAttribute(id, "confidence") ?? 1.0),
+      color: confidenceColor(this.graph.getNodeAttribute(id, "confidence") ?? 1.0, this._confMin, this._confMax),
       isCenter: id === centerId,
     })).sort((a, b) => b.confidence - a.confidence || (a.isCenter ? -1 : 1)).slice(0, 8)
 
@@ -657,7 +657,7 @@ const SigmaGraph = {
     nodes.forEach(n => {
       const y = yPos[n.id]
       const r = n.isCenter ? 9 : 6
-      const color = confidenceColor(n.confidence)
+      const color = confidenceColor(n.confidence, this._confMin, this._confMax)
       const g = document.createElementNS(ns, "g")
       g.style.cursor = "pointer"
       g.addEventListener("click", () => {
@@ -785,7 +785,7 @@ const SigmaGraph = {
       this.graph.setNodeAttribute(id, "_color",
         isolated
           ? "#dc2626"  // dark red — tints the sphere texture red
-          : confidenceColor(this.graph.getNodeAttribute(id, "confidence") ?? 1.0)
+          : confidenceColor(this.graph.getNodeAttribute(id, "confidence") ?? 1.0, this._confMin, this._confMax)
       )
     })
   },
@@ -952,12 +952,20 @@ const SigmaGraph = {
       const deg = this.graph.degree(id)
       if (deg > this._maxDegree) this._maxDegree = deg
     })
+    // Compute confidence range for normalized color mapping
+    let confMin = Infinity, confMax = -Infinity
+    this.graph.forEachNode((id) => {
+      const c = this.graph.getNodeAttribute(id, "confidence") ?? 1.0
+      if (c < confMin) confMin = c
+      if (c > confMax) confMax = c
+    })
+    this._confMin = confMin === Infinity ? 0 : confMin
+    this._confMax = confMax === -Infinity ? 1 : confMax
     this.graph.forEachNode((id) => {
       const deg = this.graph.degree(id)
       const isSynthesis = this.graph.getNodeAttribute(id, "node_type") === "synthesis"
-      // Synthesis nodes are larger so the pie slices are clearly legible
       this.graph.setNodeAttribute(id, "_size", isSynthesis ? sigmaNodeSize(deg) + 8 : sigmaNodeSize(deg))
-      this.graph.setNodeAttribute(id, "_color", confidenceColor(this.graph.getNodeAttribute(id, "confidence") ?? 1.0))
+      this.graph.setNodeAttribute(id, "_color", confidenceColor(this.graph.getNodeAttribute(id, "confidence") ?? 1.0, this._confMin, this._confMax))
     })
 
     const nodeCount = this.graph.order
@@ -1898,9 +1906,10 @@ function sigmaNodeColor(deg, maxDeg) {
 
 // Confidence-based node color: normalize within observed range [0.65, 1.0],
 // split into three equal bands: red (low) → yellow (mid) → blue (high).
-function confidenceColor(confidence) {
-  // Red (#ef4444) → Blue (#3b82f6), normalized over [0, 1]
-  const t = Math.max(0, Math.min(1, confidence ?? 0))
+function confidenceColor(confidence, min = 0, max = 1) {
+  // Red (#ef4444) → Blue (#3b82f6), normalized over [min, max]
+  const range = max - min
+  const t = range > 0 ? Math.max(0, Math.min(1, (confidence - min) / range)) : 0.5
   const r = Math.round(239 + (59  - 239) * t)
   const g = Math.round(68  + (130 - 68)  * t)
   const b = Math.round(68  + (246 - 68)  * t)
