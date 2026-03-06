@@ -466,7 +466,7 @@ const SigmaGraph = {
       this.graph.setNodeAttribute(id, "_color",
         isolated
           ? "#dc2626"  // dark red — tints the sphere texture red
-          : sigmaNodeColor(this.graph.degree(id), this._maxDegree)
+          : confidenceColor(this.graph.getNodeAttribute(id, "confidence") ?? 1.0)
       )
     })
   },
@@ -638,7 +638,7 @@ const SigmaGraph = {
       const isSynthesis = this.graph.getNodeAttribute(id, "node_type") === "synthesis"
       // Synthesis nodes are larger so the pie slices are clearly legible
       this.graph.setNodeAttribute(id, "_size", isSynthesis ? sigmaNodeSize(deg) + 8 : sigmaNodeSize(deg))
-      this.graph.setNodeAttribute(id, "_color", sigmaNodeColor(deg, this._maxDegree))
+      this.graph.setNodeAttribute(id, "_color", confidenceColor(this.graph.getNodeAttribute(id, "confidence") ?? 1.0))
     })
 
     const nodeCount = this.graph.order
@@ -1464,9 +1464,8 @@ const SigmaGraph = {
       return result
     }
 
-    // Selected node — amber
+    // Selected node — keep confidence color, just enlarge
     if (id === this._selectedNode) {
-      result.color = "#f59e0b"
       result.size = result.size + 6
       result.zIndex = 30
       return result
@@ -1576,6 +1575,16 @@ function sigmaNodeColor(deg, maxDeg) {
   // Blue range: 214° hue. Sky-blue (low degree) → deep royal blue (high degree).
   const lightness = Math.round(72 - t * 32)
   return hslToHex(214, 80, lightness)
+}
+
+// Confidence-based node color: normalize within observed range [0.65, 1.0],
+// split into three equal bands: red (low) → yellow (mid) → blue (high).
+function confidenceColor(confidence) {
+  const MIN = 0.65, MAX = 1.0
+  const norm = Math.max(0, Math.min(1, (confidence - MIN) / (MAX - MIN)))
+  if (norm < 1 / 3) return "#f87171"  // red-400
+  if (norm < 2 / 3) return "#fbbf24"  // amber-400
+  return "#60a5fa"                     // blue-400
 }
 
 // Force any CSS color string (including oklch, hsl) to a hex value by
