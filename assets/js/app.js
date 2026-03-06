@@ -764,8 +764,14 @@ const SigmaGraph = {
     this._hiddenNodes = new Set()
     this._hiddenEdges = new Set()
     const min = this._minDegree
+    const confRange = (this._confMax ?? 1) - (this._confMin ?? 0)
     this.graph.forEachNode((id) => {
       const deg = this.graph.degree(id)
+      // Low-confidence nodes (bottom third of range) are always visible —
+      // they have higher probability of showing interesting connections.
+      const c = this.graph.getNodeAttribute(id, "confidence") ?? 1.0
+      const normConf = confRange > 0 ? Math.max(0, Math.min(1, (c - (this._confMin ?? 0)) / confRange)) : 0.5
+      if (normConf < 0.33) return  // exempt from degree filter
       if ((min > 1 && deg < min) || (this._hideIsolated && deg === 0)) {
         this._hiddenNodes.add(id)
       }
