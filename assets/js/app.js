@@ -134,6 +134,8 @@ const SigmaGraph = {
     this._mouseY = 0
     this._selectedEdge = null          // currently clicked edge
     this._edgeHighlightedNodes = new Set() // endpoints of _selectedEdge
+    this._lastCenterId = null          // saved for re-render on AD expand
+    this._lastHoodSet = null           // saved for re-render on AD expand
 
     // Track cursor position for tooltip anchoring.
     this._onMouseMove = (e) => {
@@ -222,6 +224,22 @@ const SigmaGraph = {
     if (nameInput) nameInput.addEventListener("keydown", (e) => {
       if (e.key === "Enter") { confirmBtn && confirmBtn.click() }
       if (e.key === "Escape") this._hideSaveViewDialog()
+    })
+
+    this.handleEvent("ad_toggled", ({expanded}) => {
+      // Dismiss tooltip and resize Sigma after LiveView has applied the new panel classes
+      this._highlightedNode = null
+      this._hoveredNeighbors = new Set()
+      this._hoveredEdges = new Set()
+      const tip = document.getElementById("node-tooltip")
+      if (tip) { tip.style.display = "none"; tip.innerHTML = "" }
+      if (this.sigma) this.sigma.refresh()
+      setTimeout(() => {
+        if (this.sigma) this.sigma.resize()
+        if (expanded && this._lastCenterId && this._lastHoodSet) {
+          this._renderArcDiagram(this._lastCenterId, this._lastHoodSet)
+        }
+      }, 50)
     })
 
     this.handleEvent("neighborhood_changed", (neighborhood) => {
@@ -351,6 +369,8 @@ const SigmaGraph = {
   },
 
   _applyNeighborhood(hoodSet, centerId) {
+    this._lastHoodSet = hoodSet
+    this._lastCenterId = centerId
     // Everything outside the hood is hidden; trail nodes are always shown.
     this._overlayHidden = new Set()
     this._overlayHiddenEdges = new Set()
@@ -392,6 +412,8 @@ const SigmaGraph = {
   _renderArcDiagram(centerId, hoodSet) {
     const el = document.getElementById("arc-diagram")
     if (!el || !this.graph) return
+    const expandBtn = document.getElementById("arc-expand-btn")
+    if (expandBtn) expandBtn.classList.replace("hidden", "flex")
 
     const allIds = Array.from(hoodSet)
     const nodes = allIds.map(id => ({
@@ -410,10 +432,13 @@ const SigmaGraph = {
     })
 
     const W = el.clientWidth || 272
-    const nodeSpacing = 28
-    const topPad = 14
+    const expanded = W > 400
+    const nodeSpacing = expanded ? 40 : 28
+    const topPad = expanded ? 20 : 14
+    const spineX = expanded ? Math.round(W * 0.18) : 68
+    const maxLabel = expanded ? 80 : 30
+    const fontSize = expanded ? 12 : 10
     const H = topPad * 2 + nodeSpacing * Math.max(nodes.length - 1, 0)
-    const spineX = 68
     const ns = "http://www.w3.org/2000/svg"
 
     const yPos = {}
@@ -450,7 +475,7 @@ const SigmaGraph = {
     // Nodes + labels
     nodes.forEach(n => {
       const y = yPos[n.id]
-      const r = n.isCenter ? 6 : 4
+      const r = n.isCenter ? (expanded ? 8 : 6) : (expanded ? 5 : 4)
       const g = document.createElementNS(ns, "g")
       g.style.cursor = "pointer"
       g.addEventListener("click", () => this.pushEvent("node_selected", { id: n.id }))
@@ -464,10 +489,11 @@ const SigmaGraph = {
       g.appendChild(circle)
 
       const text = document.createElementNS(ns, "text")
-      text.setAttribute("x", spineX + r + 6); text.setAttribute("y", y + 4)
-      text.setAttribute("font-size", "10"); text.setAttribute("fill", "#6b7280")
+      text.setAttribute("x", spineX + r + 6); text.setAttribute("y", y + Math.round(fontSize * 0.35))
+      text.setAttribute("font-size", fontSize); text.setAttribute("fill", "#6b7280")
       text.setAttribute("font-family", "ui-sans-serif, system-ui, sans-serif")
-      text.textContent = n.label.length > 30 ? n.label.slice(0, 27) + "…" : n.label
+      text.setAttribute("dominant-baseline", "middle")
+      text.textContent = n.label.length > maxLabel ? n.label.slice(0, maxLabel - 1) + "…" : n.label
       g.appendChild(text)
 
       svg.appendChild(g)

@@ -36,6 +36,7 @@ defmodule XwaWeb.GraphLive do
       |> assign(:doc_modal, nil)
       |> assign(:settings_open, false)
       |> assign(:settings_error, nil)
+      |> assign(:ad_expanded, false)
       |> assign_new(:read_only, fn -> false end)
       |> assign_new(:viewer, fn -> nil end)
 
@@ -152,8 +153,13 @@ defmodule XwaWeb.GraphLive do
   end
 
   def handle_event("deselect", _params, socket) do
-    socket = assign(socket, selected_node: nil, neighborhood: nil, connect_from: nil, new_edge_modal: nil, confirm_delete_edge: nil, selection_history: [])
+    socket = assign(socket, selected_node: nil, neighborhood: nil, connect_from: nil, new_edge_modal: nil, confirm_delete_edge: nil, selection_history: [], ad_expanded: false)
     {:noreply, push_canvas_events(socket)}
+  end
+
+  def handle_event("toggle_ad", _params, socket) do
+    socket = assign(socket, ad_expanded: !socket.assigns.ad_expanded)
+    {:noreply, push_event(socket, "ad_toggled", %{expanded: socket.assigns.ad_expanded})}
   end
 
   def handle_event("enter_focus_mode", _params, socket) do
@@ -1056,7 +1062,7 @@ defmodule XwaWeb.GraphLive do
         <% end %>
 
         <%!-- Main: graph canvas --%>
-        <div class="flex-1 relative bg-base-200/30">
+        <div id="graph-fd-panel" class={["relative bg-base-200/30", if(@ad_expanded, do: "w-72 shrink-0", else: "flex-1")]}>
           <%!-- Loading spinner: always in DOM, JS hook hides it after layout completes --%>
           <div
             id="cy-loading"
@@ -1088,6 +1094,18 @@ defmodule XwaWeb.GraphLive do
             <%!-- Explored node labels — clickable back buttons; current node shows full summary --%>
             <div id="cy-explored-labels" class="flex flex-col gap-1"></div>
           </div>
+          <%!-- Swap-to-FD button: shown when arc diagram is expanded into main area --%>
+          <%= if @ad_expanded do %>
+            <div class="absolute top-3 left-3 z-20">
+              <button
+                phx-click="toggle_ad"
+                class="flex items-center gap-1.5 rounded-lg bg-base-100/80 backdrop-blur-sm border border-base-200 px-2.5 py-1.5 text-xs text-base-content/60 hover:text-base-content hover:border-base-300 shadow-sm transition-colors"
+                title="Expand graph"
+              >
+                <.icon name="hero-arrows-right-left" class="w-3.5 h-3.5" /> Expand graph
+              </button>
+            </div>
+          <% end %>
           <%!-- Graph settings button — owner only, top-right corner --%>
           <%= if !@read_only && @current_scope.role == "owner" do %>
             <div class="absolute top-3 right-3 z-20">
@@ -1172,17 +1190,30 @@ defmodule XwaWeb.GraphLive do
         </div>
 
         <%!-- Right sidebar: node detail (always rendered so layout never shifts) --%>
-        <div class="w-72 shrink-0 border-l border-base-200 bg-base-100 flex flex-col overflow-y-auto">
+        <div id="graph-ad-panel" class={["border-l border-base-200 bg-base-100 flex flex-col overflow-y-auto", if(@ad_expanded, do: "flex-1", else: "w-72 shrink-0")]}>
           <div class="flex items-center justify-between px-4 py-3 border-b border-base-200 shrink-0">
-            <h3 class="text-sm font-semibold text-base-content">Claim detail</h3>
-            <%= if @selected_node do %>
-              <button
-                phx-click="deselect"
-                class="flex h-7 w-7 items-center justify-center rounded-lg text-base-content/40 hover:text-base-content hover:bg-base-200 transition-colors"
-              >
-                <.icon name="hero-x-mark" class="w-4 h-4" />
-              </button>
-            <% end %>
+            <h3 class="text-sm font-semibold text-base-content">
+              {if @ad_expanded, do: "Neighborhood", else: "Claim detail"}
+            </h3>
+            <div class="flex items-center gap-1">
+              <%= if @selected_node || @ad_expanded do %>
+                <button
+                  phx-click="toggle_ad"
+                  class="flex h-7 w-7 items-center justify-center rounded-lg text-base-content/40 hover:text-base-content hover:bg-base-200 transition-colors"
+                  title={if @ad_expanded, do: "Collapse", else: "Expand neighborhood"}
+                >
+                  <.icon name="hero-arrows-right-left" class="w-4 h-4" />
+                </button>
+              <% end %>
+              <%= if @selected_node do %>
+                <button
+                  phx-click="deselect"
+                  class="flex h-7 w-7 items-center justify-center rounded-lg text-base-content/40 hover:text-base-content hover:bg-base-200 transition-colors"
+                >
+                  <.icon name="hero-x-mark" class="w-4 h-4" />
+                </button>
+              <% end %>
+            </div>
           </div>
 
           <%!-- Arc diagram — rendered client-side by SigmaGraph hook; phx-update="ignore" preserves D3 content --%>
