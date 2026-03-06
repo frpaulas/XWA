@@ -163,6 +163,10 @@ defmodule Xwa.Ingestion.IngestionWorker do
   defp extract_all_claims(doc, text, requesting_user_id, graph_id) do
     segments = DocumentSegmenter.segment(text)
 
+    if segments == [] do
+      Logger.error("[Ingestion] DocumentSegmenter returned no segments for document #{doc.id} — skipping extraction")
+    end
+
     result =
       Enum.reduce_while(segments, {:ok, []}, fn seg, {:ok, acc} ->
         case extract_claims(doc, seg, requesting_user_id, graph_id) do

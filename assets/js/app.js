@@ -1494,11 +1494,12 @@ const SigmaGraph = {
     const confidence = attrs.confidence ?? 0.5
     // Opacity: low-confidence edges fade to 25%, high-confidence stay fully visible.
     const alpha = Math.round((0.25 + confidence * 0.75) * 255).toString(16).padStart(2, "0")
+    const certaintyColor = { solid: "#5a9e6f", dashed: "#a07830", dotted: "#f87171" }[attrs.certainty] ?? "#6b7280"
     const result = {
-      color: colors.neutral.slice(0, 7) + alpha,
+      color: certaintyColor + alpha,
       size: 0.5 + confidence * 2,
       hidden: false,
-      zIndex: 0,
+      zIndex: 5,
     }
 
     if (attrs.cross_graph) result.color = "#f59e0b" + alpha
@@ -1508,9 +1509,9 @@ const SigmaGraph = {
 
     // Edge click: highlight selected edge prominently
     if (this._selectedEdge === id) {
-      result.color = edgeTypeColor(attrs.type)
+      result.color = certaintyColor + "ff"
       result.size = 4
-      result.zIndex = 2
+      result.zIndex = 50
       return result
     }
 
@@ -1519,19 +1520,17 @@ const SigmaGraph = {
 
     // Focus dimming
     if (this._dimmedEdges.has(id)) {
-      result.color = colors.neutral
+      result.color = certaintyColor + "30"
       result.size = 0.5
+      result.zIndex = 0
       return result
     }
 
     // Hover highlight
     if (this._hoveredEdges.has(id)) {
-      const source = this.graph.source(id)
-      const target = this.graph.target(id)
-      const edgeType = this.graph.getEdgeAttribute(id, "type")
-      result.color = edgeTypeColor(edgeType)
+      result.color = certaintyColor + "ff"
       result.size = 3
-      result.zIndex = 1
+      result.zIndex = 40
     }
 
     return result
@@ -1547,14 +1546,6 @@ function pointToSegDist(px, py, ax, ay, bx, by) {
   return Math.hypot(px - (ax + t * dx), py - (ay + t * dy))
 }
 
-// Assign one of 3 colors to an edge based on its type string.
-const EDGE_COLORS = ["#38bdf8", "#a78bfa", "#fb7185"]
-function edgeTypeColor(type) {
-  if (!type) return EDGE_COLORS[0]
-  let hash = 0
-  for (let i = 0; i < type.length; i++) hash = (hash * 31 + type.charCodeAt(i)) | 0
-  return EDGE_COLORS[Math.abs(hash) % EDGE_COLORS.length]
-}
 
 // Escape HTML special chars for safe insertion into innerHTML strings.
 function escHtml(str) {

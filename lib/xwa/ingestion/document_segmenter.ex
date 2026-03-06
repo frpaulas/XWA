@@ -66,8 +66,15 @@ defmodule Xwa.Ingestion.DocumentSegmenter do
     primary_segments =
       cond do
         hearing?(text) ->
-          Logger.info("[DocumentSegmenter] Detected congressional hearing format")
-          HearingSegmenter.segment(text)
+          case HearingSegmenter.segment(text) do
+            [] ->
+              Logger.warning("[DocumentSegmenter] HearingSegmenter returned no segments — falling back to full-doc")
+              [fallback(text)]
+
+            segs ->
+              Logger.info("[DocumentSegmenter] Detected congressional hearing format (#{length(segs)} segments)")
+              segs
+          end
 
         segments = try_inline_dialogue(text) ->
           Logger.info("[DocumentSegmenter] Detected inline dialogue (#{length(segments)} segments)")
