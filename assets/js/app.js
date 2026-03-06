@@ -1438,7 +1438,8 @@ const SigmaGraph = {
 
     this.graph.forEachNode((id) => {
       if (this._hiddenNodes.has(id)) return
-      if (this.graph.getNodeAttribute(id, "_isolated")) {
+      // Use degree directly — more reliable than the _isolated attribute
+      if (this.graph.degree(id) === 0) {
         isolated.push(id)
       } else {
         const x = this.graph.getNodeAttribute(id, "x")
@@ -1638,11 +1639,11 @@ const SigmaGraph = {
   _onLayoutDone(skipPlacement = false) {
     this._layoutDone = true
     this._applyDegreeFilter()
-    // Only re-place isolated nodes and separate components when positions came from FA2.
-    // When restoring saved positions the layout is already correct — re-running placement
-    // would overwrite the saved ring/component positions with freshly-calculated ones.
+    // Always cluster deg-0 nodes regardless of saved positions — their saved positions
+    // may predate the grid layout or be scattered from FA2.
+    this._placeIsolatedNodes()
+    // Only re-separate connected components when positions came from FA2.
     if (!skipPlacement) {
-      this._placeIsolatedNodes()
       this._separateComponents()
     }
     this._hideOverlay()
