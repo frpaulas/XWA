@@ -424,28 +424,30 @@ const SigmaGraph = {
     if (expandBtn) expandBtn.classList.replace("hidden", "flex")
 
     const allIds = Array.from(hoodSet)
+    // Cap at 8 nodes for the mini view (modal shows all)
     const nodes = allIds.map(id => ({
       id,
       label: this.graph.getNodeAttribute(id, "label") || id,
       confidence: this.graph.getNodeAttribute(id, "confidence") ?? 1.0,
       color: confidenceColor(this.graph.getNodeAttribute(id, "confidence") ?? 1.0),
       isCenter: id === centerId,
-    })).sort((a, b) => b.confidence - a.confidence || (a.isCenter ? -1 : 1))
+    })).sort((a, b) => b.confidence - a.confidence || (a.isCenter ? -1 : 1)).slice(0, 8)
 
     const edges = []
+    const nodeIds = new Set(nodes.map(n => n.id))
     this.graph.forEachEdge((eid, attrs, source, target) => {
-      if (hoodSet.has(source) && hoodSet.has(target)) {
+      if (nodeIds.has(source) && nodeIds.has(target)) {
         edges.push({ source, target, certainty: attrs.certainty || "solid" })
       }
     })
 
     const W = el.clientWidth || 272
-    const expanded = W > 400
-    const nodeSpacing = expanded ? 40 : 28
-    const topPad = expanded ? 20 : 14
-    const spineX = expanded ? Math.round(W * 0.18) : 68
-    const maxLabel = expanded ? 80 : 30
-    const fontSize = expanded ? 12 : 10
+    const nodeSpacing = 28
+    const topPad = 14
+    // Spine at 55% — labels go LEFT (right-aligned), arcs bow RIGHT
+    const spineX = Math.round(W * 0.55)
+    const maxLabel = 22
+    const fontSize = 10
     const H = topPad * 2 + nodeSpacing * Math.max(nodes.length - 1, 0)
     const ns = "http://www.w3.org/2000/svg"
 
@@ -456,34 +458,37 @@ const SigmaGraph = {
     svg.setAttribute("width", W)
     svg.setAttribute("height", H)
     svg.style.display = "block"
+    svg.style.color = "inherit"
 
     // Spine
     const spine = document.createElementNS(ns, "line")
     spine.setAttribute("x1", spineX); spine.setAttribute("y1", topPad)
     spine.setAttribute("x2", spineX); spine.setAttribute("y2", H - topPad)
-    spine.setAttribute("stroke", "#d1d5db"); spine.setAttribute("stroke-width", "1")
+    spine.setAttribute("stroke", "currentColor"); spine.setAttribute("stroke-width", "1")
+    spine.setAttribute("opacity", "0.15")
     svg.appendChild(spine)
 
-    // Arcs (bow left)
+    // Arcs (bow right into open space)
     edges.forEach(e => {
       const y1 = yPos[e.source], y2 = yPos[e.target]
       if (y1 === undefined || y2 === undefined) return
       const bow = Math.max(Math.abs(y2 - y1) * 0.45, 8)
+      const mx = spineX + bow
       const dashArr = e.certainty === "dashed" ? "4 2" : e.certainty === "dotted" ? "1 3" : "none"
       const path = document.createElementNS(ns, "path")
-      path.setAttribute("d", `M ${spineX} ${y1} C ${spineX - bow} ${y1} ${spineX - bow} ${y2} ${spineX} ${y2}`)
+      path.setAttribute("d", `M ${spineX} ${y1} C ${mx} ${y1} ${mx} ${y2} ${spineX} ${y2}`)
       path.setAttribute("fill", "none")
-      path.setAttribute("stroke", "#94a3b8")
+      path.setAttribute("stroke", "currentColor")
       path.setAttribute("stroke-width", "1.5")
       path.setAttribute("stroke-dasharray", dashArr)
-      path.setAttribute("opacity", "0.55")
+      path.setAttribute("opacity", "0.35")
       svg.appendChild(path)
     })
 
     // Nodes + labels
     nodes.forEach(n => {
       const y = yPos[n.id]
-      const r = n.isCenter ? (expanded ? 8 : 6) : (expanded ? 5 : 4)
+      const r = n.isCenter ? 6 : 4
       const g = document.createElementNS(ns, "g")
       g.style.cursor = "pointer"
       g.addEventListener("click", () => this.pushEvent("node_selected", { id: n.id }))
@@ -496,9 +501,12 @@ const SigmaGraph = {
       }
       g.appendChild(circle)
 
+      // Label LEFT of spine, right-aligned
       const text = document.createElementNS(ns, "text")
-      text.setAttribute("x", spineX + r + 6); text.setAttribute("y", y + Math.round(fontSize * 0.35))
-      text.setAttribute("font-size", fontSize); text.setAttribute("fill", "#6b7280")
+      text.setAttribute("x", spineX - r - 5); text.setAttribute("y", y)
+      text.setAttribute("font-size", fontSize)
+      text.setAttribute("fill", "currentColor")
+      text.setAttribute("text-anchor", "end")
       text.setAttribute("font-family", "ui-sans-serif, system-ui, sans-serif")
       text.setAttribute("dominant-baseline", "middle")
       text.textContent = n.label.length > maxLabel ? n.label.slice(0, maxLabel - 1) + "…" : n.label
@@ -571,12 +579,12 @@ const SigmaGraph = {
       }
     })
 
-    // Layout constants
+    // Layout constants — spine at 62%, labels LEFT (right-aligned), arcs bow RIGHT
     const nodeSpacing = 52
     const topPad = 32
     const svgH = topPad * 2 + nodeSpacing * Math.max(nodes.length - 1, 0)
     const svgW = body.clientWidth || 800
-    const spineX = Math.round(svgW * 0.22)
+    const spineX = Math.round(svgW * 0.62)
     const ns = "http://www.w3.org/2000/svg"
 
     // D3 scales
@@ -592,29 +600,30 @@ const SigmaGraph = {
     const yPos = {}
     nodes.forEach(n => { yPos[n.id] = yScale(n.id) })
 
-    // Create SVG
+    // Create SVG — color: inherit so currentColor resolves to base-content
     const svg = document.createElementNS(ns, "svg")
     svg.setAttribute("width", svgW)
     svg.setAttribute("height", svgH)
     svg.style.display = "block"
+    svg.style.color = "inherit"
 
     // Spine
     const spine = document.createElementNS(ns, "line")
     spine.setAttribute("x1", spineX); spine.setAttribute("y1", topPad)
     spine.setAttribute("x2", spineX); spine.setAttribute("y2", svgH - topPad)
-    spine.setAttribute("stroke", "#e2e8f0"); spine.setAttribute("stroke-width", "1")
+    spine.setAttribute("stroke", "currentColor"); spine.setAttribute("stroke-width", "1")
+    spine.setAttribute("opacity", "0.15")
     svg.appendChild(spine)
 
-    // Arcs + edge labels
+    // Arcs bow RIGHT (into open space); edge labels right of arc midpoint
     edges.forEach(e => {
       const y1 = yPos[e.source], y2 = yPos[e.target]
       if (y1 === undefined || y2 === undefined) return
       const span = Math.abs(y2 - y1)
       const bow = Math.max(span * 0.42, 14)
-      const mx = spineX - bow          // control point x
+      const mx = spineX + bow          // control point x — bow RIGHT
       const my = (y1 + y2) / 2        // midpoint y
 
-      // Arc path using d3-path
       const p = d3path()
       p.moveTo(spineX, y1)
       p.bezierCurveTo(mx, y1, mx, y2, spineX, y2)
@@ -623,23 +632,24 @@ const SigmaGraph = {
       const arcEl = document.createElementNS(ns, "path")
       arcEl.setAttribute("d", p.toString())
       arcEl.setAttribute("fill", "none")
-      arcEl.setAttribute("stroke", "#94a3b8")
+      arcEl.setAttribute("stroke", "currentColor")
       arcEl.setAttribute("stroke-width", "1.5")
-      arcEl.setAttribute("opacity", "0.5")
+      arcEl.setAttribute("opacity", "0.35")
       if (dashArr) arcEl.setAttribute("stroke-dasharray", dashArr)
       svg.appendChild(arcEl)
 
-      // Edge label at arc midpoint (left of spine)
+      // Edge label right of arc midpoint
       if (e.label) {
         const maxLabelLen = 28
         const labelText = e.label.length > maxLabelLen ? e.label.slice(0, maxLabelLen - 1) + "…" : e.label
         const lbl = document.createElementNS(ns, "text")
-        lbl.setAttribute("x", mx - 6)
+        lbl.setAttribute("x", mx + 6)
         lbl.setAttribute("y", my)
-        lbl.setAttribute("text-anchor", "end")
+        lbl.setAttribute("text-anchor", "start")
         lbl.setAttribute("dominant-baseline", "middle")
         lbl.setAttribute("font-size", "10")
-        lbl.setAttribute("fill", "#94a3b8")
+        lbl.setAttribute("fill", "currentColor")
+        lbl.setAttribute("opacity", "0.5")
         lbl.setAttribute("font-family", "ui-sans-serif, system-ui, sans-serif")
         lbl.textContent = labelText
         svg.appendChild(lbl)
@@ -667,23 +677,25 @@ const SigmaGraph = {
       }
       g.appendChild(circle)
 
-      // Node label (right of spine)
+      // Node label LEFT of spine, right-aligned
       const text = document.createElementNS(ns, "text")
-      text.setAttribute("x", spineX + r + 10); text.setAttribute("y", y)
+      text.setAttribute("x", spineX - r - 10); text.setAttribute("y", y)
       text.setAttribute("dominant-baseline", "middle")
+      text.setAttribute("text-anchor", "end")
       text.setAttribute("font-size", "13")
-      text.setAttribute("fill", "#374151")
+      text.setAttribute("fill", "currentColor")
       text.setAttribute("font-family", "ui-sans-serif, system-ui, sans-serif")
       text.textContent = n.label
       g.appendChild(text)
 
-      // Confidence score (left of spine)
+      // Confidence score RIGHT of spine (after arcs)
       const conf = document.createElementNS(ns, "text")
-      conf.setAttribute("x", spineX - r - 8); conf.setAttribute("y", y)
-      conf.setAttribute("text-anchor", "end")
+      conf.setAttribute("x", spineX + r + 8); conf.setAttribute("y", y)
+      conf.setAttribute("text-anchor", "start")
       conf.setAttribute("dominant-baseline", "middle")
       conf.setAttribute("font-size", "10")
-      conf.setAttribute("fill", "#94a3b8")
+      conf.setAttribute("fill", "currentColor")
+      conf.setAttribute("opacity", "0.5")
       conf.setAttribute("font-family", "ui-sans-serif, system-ui, sans-serif")
       conf.textContent = Math.round(n.confidence * 100) + "%"
       g.appendChild(conf)
