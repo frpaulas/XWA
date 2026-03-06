@@ -1904,15 +1904,32 @@ function sigmaNodeColor(deg, maxDeg) {
   return hslToHex(214, 80, lightness)
 }
 
-// Confidence-based node color: normalize within observed range [0.65, 1.0],
-// split into three equal bands: red (low) → yellow (mid) → blue (high).
+// Confidence-based node color: interpolate across a 12-stop gradient,
+// normalized to the observed [min, max] range in the graph.
+// Gradient: red → orange → yellow → pink → purple → blue
+const _CONF_RAMP = [
+  [0xd8, 0x0d, 0x05], // #d80d05
+  [0xe6, 0x4d, 0x00], // #e64d00
+  [0xf1, 0x74, 0x00], // #f17400
+  [0xf9, 0x98, 0x00], // #f99800
+  [0xff, 0xba, 0x00], // #ffba00
+  [0xff, 0xaf, 0x10], // #ffaf10
+  [0xff, 0xa3, 0x1c], // #ffa31c
+  [0xff, 0x98, 0x25], // #ff9825
+  [0xff, 0x5b, 0x4d], // #ff5b4d
+  [0xff, 0x00, 0x85], // #ff0085
+  [0xd0, 0x08, 0xc3], // #d008c3
+  [0x1c, 0x4c, 0xf4], // #1c4cf4
+]
 function confidenceColor(confidence, min = 0, max = 1) {
-  // Red (#ef4444) → Blue (#3b82f6), normalized over [min, max]
   const range = max - min
   const t = range > 0 ? Math.max(0, Math.min(1, (confidence - min) / range)) : 0.5
-  const r = Math.round(239 + (59  - 239) * t)
-  const g = Math.round(68  + (130 - 68)  * t)
-  const b = Math.round(68  + (246 - 68)  * t)
+  const pos = t * (_CONF_RAMP.length - 1)
+  const lo = Math.floor(pos), hi = Math.min(lo + 1, _CONF_RAMP.length - 1)
+  const f = pos - lo
+  const r = Math.round(_CONF_RAMP[lo][0] + (_CONF_RAMP[hi][0] - _CONF_RAMP[lo][0]) * f)
+  const g = Math.round(_CONF_RAMP[lo][1] + (_CONF_RAMP[hi][1] - _CONF_RAMP[lo][1]) * f)
+  const b = Math.round(_CONF_RAMP[lo][2] + (_CONF_RAMP[hi][2] - _CONF_RAMP[lo][2]) * f)
   return `#${r.toString(16).padStart(2, "0")}${g.toString(16).padStart(2, "0")}${b.toString(16).padStart(2, "0")}`
 }
 
