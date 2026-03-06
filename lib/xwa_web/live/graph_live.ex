@@ -1186,7 +1186,7 @@ defmodule XwaWeb.GraphLive do
           </div>
 
           <%!-- Arc diagram — rendered client-side by SigmaGraph hook; phx-update="ignore" preserves D3 content --%>
-          <div id="arc-diagram" phx-update="ignore" class="border-b border-base-200 overflow-hidden"></div>
+          <div id="arc-diagram" phx-update="ignore" class="border-b border-base-200"></div>
 
           <%= if @selected_node do %>
             <div class="px-4 py-4 space-y-4 text-sm">

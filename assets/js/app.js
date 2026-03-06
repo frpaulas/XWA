@@ -475,6 +475,9 @@ const SigmaGraph = {
 
     el.innerHTML = ""
     el.appendChild(svg)
+    // Scroll sidebar to top so arc diagram is visible
+    const sidebar = el.parentElement
+    if (sidebar) sidebar.scrollTop = 0
   },
 
   _clearArcDiagram() {
