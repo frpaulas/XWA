@@ -1916,8 +1916,8 @@ const _CONF_RAMP = [
 function confidenceColor(confidence, min = 0, max = 1) {
   const raw = range => Math.max(0, Math.min(1, (confidence - min) / range))
   const range = max - min
-  // Square-root stretch pushes clustered mid values toward the blue end
-  const t = Math.pow(range > 0 ? raw(range) : 0.5, 0.5)
+  // Gamma stretch (0.65): milder than sqrt (0.5), pushes mid values toward blue
+  const t = Math.pow(range > 0 ? raw(range) : 0.5, 0.65)
   const pos = t * (_CONF_RAMP.length - 1)
   const lo = Math.floor(pos), hi = Math.min(lo + 1, _CONF_RAMP.length - 1)
   const f = pos - lo
