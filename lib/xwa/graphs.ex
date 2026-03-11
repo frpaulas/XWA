@@ -141,6 +141,21 @@ defmodule Xwa.Graphs do
   end
 
   @doc """
+  Stores the converged corpus fingerprint (GFP) on a graph.
+  Returns `{:ok, graph}` or `{:error, changeset}`.
+  """
+  @spec update_fingerprint(String.t(), map()) :: {:ok, Graph.t()} | {:error, any()}
+  def update_fingerprint(graph_id, fingerprint) when is_binary(graph_id) and is_map(fingerprint) do
+    case Repo.get(Graph, graph_id) do
+      nil -> {:error, :not_found}
+      graph ->
+        graph
+        |> Ecto.Changeset.change(fingerprint: fingerprint)
+        |> Repo.update()
+    end
+  end
+
+  @doc """
   Returns all graphs in the system with their owner user preloaded.
   Used by admin UI to select a target graph for document import.
   """

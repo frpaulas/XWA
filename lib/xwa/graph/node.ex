@@ -85,7 +85,11 @@ defmodule Xwa.Graph.Node do
     node_type: "claim",
     # List of %{node_id: uuid, graph_id: uuid} maps — populated only for
     # synthesis nodes. Stored in Memgraph as parallel string lists.
-    constituents: []
+    constituents: [],
+    # ILV credibility score (0–1) and 4-D corpus fingerprint.
+    # Populated by the calibration pipeline. nil until calibrated.
+    ilv_score: nil,
+    ilv_fingerprint: nil
   ]
 
   @type t :: %__MODULE__{
@@ -249,9 +253,18 @@ defmodule Xwa.Graph.Node do
       graph_id: props["graph_id"],
       visibility: Map.get(props, "visibility", "system"),
       node_type: props["node_type"] || "claim",
-      constituents: zip_constituents(props["constituent_node_ids"], props["constituent_graph_ids"])
+      constituents: zip_constituents(props["constituent_node_ids"], props["constituent_graph_ids"]),
+      ilv_score: props["ilv_score"],
+      ilv_fingerprint: atomize_ilv_fp(props["ilv_fingerprint"])
     }
   end
+
+  defp atomize_ilv_fp(nil), do: nil
+
+  defp atomize_ilv_fp(%{"w" => w, "x" => x, "y" => y, "z" => z}),
+    do: %{w: w, x: x, y: y, z: z}
+
+  defp atomize_ilv_fp(fp) when is_map(fp), do: fp
 
   defp zip_constituents(nil, _), do: []
   defp zip_constituents([], _), do: []

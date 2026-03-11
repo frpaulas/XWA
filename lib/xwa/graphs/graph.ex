@@ -11,6 +11,7 @@ defmodule Xwa.Graphs.Graph do
     field :is_composite, :boolean, default: false
     field :public, :boolean, default: false
     field :slug, :string
+    field :fingerprint, :map
 
     belongs_to :organization, Xwa.Accounts.Organization
     has_many :memberships, Xwa.Graphs.GraphMembership

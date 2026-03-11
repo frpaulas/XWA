@@ -3,10 +3,15 @@ defmodule XwaWeb.GraphLive do
 
   alias Xwa.Graph.{Nodes, Edges, FocusScorer}
   alias Xwa.{Documents, Graphs}
+  alias Xwa.Ingestion.CalibrationWorker
 
   @impl true
   def mount(_params, _session, socket) do
-    if connected?(socket), do: Process.send_after(self(), :load_graph, 50)
+    if connected?(socket) do
+      Process.send_after(self(), :load_graph, 50)
+      graph_id = socket.assigns[:current_scope] && socket.assigns.current_scope.graph_id
+      if graph_id, do: Phoenix.PubSub.subscribe(Xwa.PubSub, "graph:#{graph_id}")
+    end
 
     socket =
       socket
@@ -36,6 +41,9 @@ defmodule XwaWeb.GraphLive do
       |> assign(:doc_modal, nil)
       |> assign(:settings_open, false)
       |> assign(:settings_error, nil)
+      |> assign(:calibration_status, :idle)
+      |> assign(:calibration_confirm, false)
+      |> assign(:calibration_progress, nil)
       |> assign_new(:read_only, fn -> false end)
       |> assign_new(:viewer, fn -> nil end)
 
@@ -261,6 +269,30 @@ defmodule XwaWeb.GraphLive do
     end
   end
 
+  def handle_event("calibrate_graph", _params, socket) do
+    {:noreply, assign(socket, calibration_confirm: true)}
+  end
+
+  def handle_event("calibrate_cancel", _params, socket) do
+    {:noreply, assign(socket, calibration_confirm: false)}
+  end
+
+  def handle_event("calibrate_confirm", _params, socket) do
+    graph_id = socket.assigns.current_scope.graph_id
+
+    if graph_id do
+      CalibrationWorker.run_async(graph_id)
+
+      {:noreply,
+       socket
+       |> assign(:calibration_confirm, false)
+       |> assign(:calibration_status, :running)
+       |> assign(:calibration_progress, %{phase: :started, done: 0, total: 0})}
+    else
+      {:noreply, put_flash(socket, :error, "No active graph.")}
+    end
+  end
+
   @impl true
   def handle_info(:load_graph, socket) do
     user_id = socket.assigns.current_scope.user.id
@@ -394,6 +426,29 @@ defmodule XwaWeb.GraphLive do
     socket = assign(socket, explore_loading: false, focus_neighborhoods: neighborhoods, focus_mode: true)
     {:noreply, push_canvas_events(socket)}
   end
+
+  def handle_info({:calibration_progress, phase, data}, socket) do
+    progress = Map.merge(data, %{phase: phase})
+    {:noreply, assign(socket, calibration_status: :running, calibration_progress: progress)}
+  end
+
+  def handle_info({:calibration_complete, data}, socket) do
+    {:noreply,
+     socket
+     |> assign(:calibration_status, :complete)
+     |> assign(:calibration_progress, data)
+     |> put_flash(:info, "Calibration complete — #{data.scored} claims scored.")}
+  end
+
+  def handle_info({:calibration_failed, reason}, socket) do
+    {:noreply,
+     socket
+     |> assign(:calibration_status, :idle)
+     |> assign(:calibration_progress, nil)
+     |> put_flash(:error, "Calibration failed: #{inspect(reason)}")}
+  end
+
+  def handle_info(_msg, socket), do: {:noreply, socket}
 
   def handle_event("start_connect", _params, %{assigns: %{read_only: true}} = socket),
     do: {:noreply, socket}
@@ -1259,6 +1314,57 @@ defmodule XwaWeb.GraphLive do
                 <% end %>
               </div>
 
+              <%!-- ILV credibility score + fingerprints --%>
+              <%= if @selected_node.ilv_score do %>
+                <% graph = @current_scope && @current_scope.graph %>
+                <% gfp = graph && graph.fingerprint && %{
+                  w: graph.fingerprint["w"], x: graph.fingerprint["x"],
+                  y: graph.fingerprint["y"], z: graph.fingerprint["z"]
+                } %>
+                <div>
+                  <p class="text-xs font-medium text-base-content/50 mb-1.5">Credibility</p>
+                  <div class="flex items-center gap-2 mb-2">
+                    <div class="flex-1 h-1.5 rounded-full bg-base-300 overflow-hidden">
+                      <div
+                        class="h-full rounded-full transition-all"
+                        style={"width: #{round(@selected_node.ilv_score * 100)}%; background: oklch(calc(0.55 + #{@selected_node.ilv_score} * 0.3) calc(0.15 + #{@selected_node.ilv_score} * 0.05) 145)"}
+                      ></div>
+                    </div>
+                    <span class="text-xs text-base-content/50 tabular-nums">
+                      {Float.round(@selected_node.ilv_score, 3)}
+                    </span>
+                  </div>
+                  <%= if @selected_node.ilv_fingerprint do %>
+                    <% fp = @selected_node.ilv_fingerprint %>
+                    <%!-- Header row --%>
+                    <div class="grid grid-cols-4 gap-1 text-center mb-0.5">
+                      <%= for dim <- [:w, :x, :y, :z] do %>
+                        <div class="text-[10px] text-base-content/30 uppercase"><%= dim %></div>
+                      <% end %>
+                    </div>
+                    <%!-- Claim FP row --%>
+                    <div class="grid grid-cols-4 gap-1 text-center mb-1" title="Claim fingerprint">
+                      <%= for dim <- [:w, :x, :y, :z] do %>
+                        <div class="rounded bg-base-200 px-1 py-1 text-xs tabular-nums text-base-content/70">
+                          <%= Float.round(Map.get(fp, dim) || 0.0, 3) %>
+                        </div>
+                      <% end %>
+                    </div>
+                    <%!-- GFP row --%>
+                    <%= if gfp && gfp.w do %>
+                      <div class="grid grid-cols-4 gap-1 text-center" title="Graph fingerprint (GFP)">
+                        <%= for dim <- [:w, :x, :y, :z] do %>
+                          <div class="rounded bg-base-300/60 px-1 py-1 text-xs tabular-nums text-base-content/40">
+                            <%= Float.round(Map.get(gfp, dim) || 0.0, 3) %>
+                          </div>
+                        <% end %>
+                      </div>
+                      <div class="mt-0.5 text-[10px] text-base-content/25 text-right">GFP</div>
+                    <% end %>
+                  <% end %>
+                </div>
+              <% end %>
+
               <%!-- Confidence --%>
               <div>
                 <p class="text-xs font-medium text-base-content/50 mb-1.5">Confidence</p>
@@ -1427,7 +1533,7 @@ defmodule XwaWeb.GraphLive do
       <%!-- Graph settings modal — owner only --%>
       <%= if @settings_open do %>
         <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
-          <div class="bg-base-100 rounded-2xl shadow-xl w-full max-w-sm mx-4 p-6">
+          <div class="bg-base-100 rounded-2xl shadow-xl w-full max-w-md mx-4 p-6">
             <div class="flex items-center justify-between mb-5">
               <h2 class="text-lg font-semibold text-base-content">Graph Settings</h2>
               <button phx-click="close_settings" class="text-base-content/40 hover:text-base-content transition-colors">
@@ -1469,6 +1575,62 @@ defmodule XwaWeb.GraphLive do
                 <button type="submit" class="btn btn-primary flex-1">Save</button>
               </div>
             </form>
+
+            <%!-- ILV Calibration section --%>
+            <div class="mt-6 pt-5 border-t border-base-200">
+              <div class="flex items-center justify-between mb-1">
+                <h3 class="text-sm font-medium text-base-content">Corpus Calibration</h3>
+                <%= if @calibration_status == :complete do %>
+                  <span class="text-xs text-success font-medium">Calibrated</span>
+                <% end %>
+              </div>
+              <p class="text-xs text-base-content/50 mb-3">
+                Scores all claims against this corpus to produce credibility scores and a graph fingerprint.
+                Runs in the background. Re-calibrate after adding significant new content.
+              </p>
+
+              <%= if @calibration_status == :running do %>
+                <%!-- Progress display --%>
+                <% prog = @calibration_progress %>
+                <div class="rounded-lg bg-base-200 px-3 py-2.5 text-xs text-base-content/70">
+                  <%= cond do %>
+                    <% prog && prog.phase == :phase1 -> %>
+                      Phase 1 — Scoring <%= prog.done %>/<%= prog.total %> claims&hellip;
+                      <div class="mt-1.5 h-1 bg-base-300 rounded-full overflow-hidden">
+                        <div class="h-full bg-primary rounded-full transition-all" style={"width: #{if prog.total > 0, do: round(prog.done / prog.total * 100), else: 0}%"}></div>
+                      </div>
+                    <% prog && prog.phase == :phase2_start -> %>
+                      GFP converged — starting final scoring&hellip;
+                    <% prog && prog.phase == :phase2 -> %>
+                      Phase 2 — Finalizing <%= prog.done %>/<%= prog.total %> claims&hellip;
+                      <div class="mt-1.5 h-1 bg-base-300 rounded-full overflow-hidden">
+                        <div class="h-full bg-primary rounded-full transition-all" style={"width: #{if prog.total > 0, do: round(prog.done / prog.total * 100), else: 0}%"}></div>
+                      </div>
+                    <% true -> %>
+                      Initializing calibration&hellip;
+                  <% end %>
+                </div>
+
+              <% else %>
+                <%= if @calibration_confirm do %>
+                  <%!-- Confirmation prompt --%>
+                  <div class="rounded-lg bg-warning/10 border border-warning/30 px-3 py-3 text-xs text-warning mb-2">
+                    This will re-score all claims in the graph (2 API calls per claim). Continue?
+                  </div>
+                  <div class="flex gap-2">
+                    <button phx-click="calibrate_cancel" class="btn btn-ghost btn-sm flex-1">Cancel</button>
+                    <button phx-click="calibrate_confirm" class="btn btn-warning btn-sm flex-1">Yes, calibrate</button>
+                  </div>
+                <% else %>
+                  <button
+                    phx-click="calibrate_graph"
+                    class="btn btn-outline btn-sm w-full"
+                  >
+                    <%= if @calibration_status == :complete, do: "Re-calibrate", else: "Calibrate" %>
+                  </button>
+                <% end %>
+              <% end %>
+            </div>
           </div>
         </div>
       <% end %>

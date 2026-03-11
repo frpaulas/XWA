@@ -582,6 +582,61 @@ defmodule Xwa.Graph.Nodes do
   end
 
   # ---------------------------------------------------------------------------
+  # ILV calibration
+  # ---------------------------------------------------------------------------
+
+  @doc """
+  Returns all Claim nodes in a graph as `%{id: string, content: string}` maps.
+  No visibility filtering — intended for internal calibration use only.
+  """
+  @spec list_all_claims(String.t()) :: {:ok, [%{id: String.t(), content: String.t()}]} | {:error, any()}
+  def list_all_claims(graph_id) when is_binary(graph_id) do
+    cypher = """
+    MATCH (n:Claim {graph_id: $graph_id})
+    WHERE n.content IS NOT NULL AND n.content <> ''
+    RETURN n.id AS id, n.content AS content
+    """
+
+    case Graph.query(cypher, %{graph_id: graph_id}) do
+      {:ok, rows} ->
+        claims =
+          rows
+          |> Enum.map(fn %{"id" => id, "content" => content} -> %{id: id, content: content} end)
+          |> Enum.reject(fn %{content: c} -> is_nil(c) or String.trim(c) == "" end)
+
+        {:ok, claims}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  @doc """
+  Stores the ILV score and fingerprint on a Claim node.
+  `fingerprint` should be `%{w: float, x: float, y: float, z: float}`.
+  """
+  @spec set_ilv(String.t(), float(), map()) :: :ok | {:error, any()}
+  def set_ilv(id, score, fingerprint)
+      when is_binary(id) and is_float(score) and is_map(fingerprint) do
+    cypher = """
+    MATCH (n:Claim {id: $id})
+    SET n.ilv_score = $score,
+        n.ilv_fingerprint = $fingerprint
+    """
+
+    Graph.run(cypher, %{
+      id: id,
+      score: score,
+      fingerprint: %{
+        "w" => Map.get(fingerprint, :w) || Map.get(fingerprint, "w") || 0.5,
+        "x" => Map.get(fingerprint, :x) || Map.get(fingerprint, "x") || 0.5,
+        "y" => Map.get(fingerprint, :y) || Map.get(fingerprint, "y") || 0.5,
+        "z" => Map.get(fingerprint, :z) || Map.get(fingerprint, "z") || 0.5
+      }
+    })
+  end
+
+  # ---------------------------------------------------------------------------
   # Private helpers
   # ---------------------------------------------------------------------------
 
