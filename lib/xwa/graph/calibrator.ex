@@ -68,12 +68,12 @@ defmodule Xwa.Graph.Calibrator do
          total = length(claims),
          _ <- broadcast(broadcast, graph_id, {:calibration_progress, :started, %{total: total}}),
          {:ok, raw_fps} <- phase1(claims, broadcast, graph_id),
-         {gfp, iterations} <- converge(raw_fps),
-         _ <- broadcast(broadcast, graph_id, {:calibration_progress, :phase2_start, %{gfp: gfp, iterations: iterations}}),
-         {:ok, scored} <- phase2(claims, gfp, broadcast, graph_id),
-         {:ok, _graph} <- Graphs.update_fingerprint(graph_id, stringify_fp(gfp)) do
-      broadcast(broadcast, graph_id, {:calibration_complete, %{gfp: gfp, scored: scored, iterations: iterations}})
-      {:ok, %{gfp: gfp, scored: scored, iterations: iterations}}
+         {api_gfp, stored_gfp, iterations} <- converge(raw_fps),
+         _ <- broadcast(broadcast, graph_id, {:calibration_progress, :phase2_start, %{gfp: api_gfp, iterations: iterations}}),
+         {:ok, scored} <- phase2(claims, api_gfp, broadcast, graph_id),
+         {:ok, _graph} <- Graphs.update_fingerprint(graph_id, stringify_fp(stored_gfp)) do
+      broadcast(broadcast, graph_id, {:calibration_complete, %{gfp: api_gfp, scored: scored, iterations: iterations}})
+      {:ok, %{gfp: api_gfp, scored: scored, iterations: iterations}}
     else
       {:error, reason} = err ->
         broadcast(broadcast, graph_id, {:calibration_failed, reason})
@@ -91,10 +91,11 @@ defmodule Xwa.Graph.Calibrator do
   @spec score_new_claim(String.t(), String.t(), map()) ::
           {:ok, %{score: float(), fingerprint: map(), drifts: boolean()}} | {:error, any()}
   def score_new_claim(claim_id, content, gfp) do
-    case IlvScorer.score(content, gfp) do
+    api_gfp = flatten_gfp(gfp)
+    case IlvScorer.score(content, api_gfp) do
       {:ok, %{score: score, fingerprint: fp}} ->
-        raw_fp = to_raw_fp(fp, gfp)
-        drifts = would_drift?(gfp, raw_fp)
+        raw_fp = to_raw_fp(fp, api_gfp)
+        drifts = would_drift?(api_gfp, raw_fp)
         {:ok, %{score: score, fingerprint: fp, drifts: drifts}}
 
       {:error, reason} ->
@@ -123,7 +124,8 @@ defmodule Xwa.Graph.Calibrator do
         end,
         max_concurrency: @concurrency,
         ordered: false,
-        timeout: 30_000
+        timeout: 60_000,
+        on_timeout: :kill_task
       )
       |> Enum.flat_map(fn
         {:ok, {:ok, {id, fp}}} ->
@@ -152,14 +154,19 @@ defmodule Xwa.Graph.Calibrator do
     do_converge(raw_fps, IlvScorer.initial_gfp(), 0)
   end
 
+  # Returns {api_gfp, stored_gfp, iterations}
+  # api_gfp  — flat %{w: median, ...} for ILV API calls
+  # stored_gfp — nested %{w: %{median: m, sd: s}, ...} for Postgres
   defp do_converge(raw_fps, gfp, iter) do
-    new_gfp = mean_fps(raw_fps)
+    new_median_gfp = median_fps(raw_fps)
 
-    if stable?(gfp, new_gfp) do
-      Logger.info("[Calibrator] GFP converged in #{iter + 1} iteration(s): #{inspect(new_gfp)}")
-      {new_gfp, iter + 1}
+    if stable?(gfp, new_median_gfp) do
+      sd = sd_fps(raw_fps, new_median_gfp)
+      stored_gfp = Map.new(@dims, fn d -> {d, %{median: Map.get(new_median_gfp, d), sd: Map.get(sd, d)}} end)
+      Logger.info("[Calibrator] GFP converged in #{iter + 1} iteration(s): #{inspect(new_median_gfp)}")
+      {new_median_gfp, stored_gfp, iter + 1}
     else
-      do_converge(raw_fps, new_gfp, iter + 1)
+      do_converge(raw_fps, new_median_gfp, iter + 1)
     end
   end
 
@@ -168,19 +175,32 @@ defmodule Xwa.Graph.Calibrator do
     Enum.all?(@dims, fn d -> abs(Map.get(old_gfp, d, 0.5) - Map.get(new_gfp, d, 0.5)) < threshold end)
   end
 
-  defp mean_fps(fps) do
-    n = length(fps)
-
-    fps
-    |> Enum.reduce(%{w: 0.0, x: 0.0, y: 0.0, z: 0.0}, fn fp, acc ->
-      %{
-        w: acc.w + Map.get(fp, :w, 0.5),
-        x: acc.x + Map.get(fp, :x, 0.5),
-        y: acc.y + Map.get(fp, :y, 0.5),
-        z: acc.z + Map.get(fp, :z, 0.5)
-      }
+  # Median per axis from a list of fingerprint maps.
+  defp median_fps(fps) do
+    Map.new(@dims, fn d ->
+      sorted = fps |> Enum.map(&Map.get(&1, d, 0.5)) |> Enum.sort()
+      n = length(sorted)
+      median =
+        if rem(n, 2) == 0 do
+          (Enum.at(sorted, div(n, 2) - 1) + Enum.at(sorted, div(n, 2))) / 2.0
+        else
+          Enum.at(sorted, div(n, 2))
+        end
+      {d, median}
     end)
-    |> Map.new(fn {d, sum} -> {d, sum / n} end)
+  end
+
+  # Population standard deviation around the median per axis.
+  defp sd_fps(fps, median_gfp) do
+    n = length(fps)
+    Map.new(@dims, fn d ->
+      center = Map.get(median_gfp, d, 0.5)
+      variance = Enum.reduce(fps, 0.0, fn fp, acc ->
+        diff = Map.get(fp, d, 0.5) - center
+        acc + diff * diff
+      end) / n
+      {d, :math.sqrt(variance)}
+    end)
   end
 
   # ---------------------------------------------------------------------------
@@ -202,7 +222,8 @@ defmodule Xwa.Graph.Calibrator do
         end,
         max_concurrency: @concurrency,
         ordered: false,
-        timeout: 30_000
+        timeout: 60_000,
+        on_timeout: :kill_task
       )
       |> Enum.reduce(0, fn
         {:ok, {:ok, {id, score, fp}}}, count ->
@@ -233,6 +254,15 @@ defmodule Xwa.Graph.Calibrator do
   # Drift detection for new claims
   # ---------------------------------------------------------------------------
 
+  # Extract flat %{w: median, ...} from either a flat or nested GFP map.
+  defp flatten_gfp(gfp) do
+    Map.new(@dims, fn d ->
+      val = Map.get(gfp, d) || Map.get(gfp, to_string(d))
+      median = if is_map(val), do: (val["median"] || Map.get(val, :median) || 0.5), else: (val || 0.5)
+      {d, median}
+    end)
+  end
+
   # Recover raw FP from a scored FP and GFP using the linear relationship.
   defp to_raw_fp(fp, gfp) do
     Map.new(@dims, fn d ->
@@ -253,7 +283,10 @@ defmodule Xwa.Graph.Calibrator do
   # ---------------------------------------------------------------------------
 
   defp stringify_fp(fp) when is_map(fp) do
-    Map.new(fp, fn {k, v} -> {to_string(k), v} end)
+    Map.new(fp, fn {k, v} ->
+      val = if is_map(v), do: Map.new(v, fn {ik, iv} -> {to_string(ik), iv} end), else: v
+      {to_string(k), val}
+    end)
   end
 
   defp broadcast(true, graph_id, message) do

@@ -1317,10 +1317,7 @@ defmodule XwaWeb.GraphLive do
               <%!-- ILV credibility score + fingerprints --%>
               <%= if @selected_node.ilv_score do %>
                 <% graph = @current_scope && @current_scope.graph %>
-                <% gfp = graph && graph.fingerprint && %{
-                  w: graph.fingerprint["w"], x: graph.fingerprint["x"],
-                  y: graph.fingerprint["y"], z: graph.fingerprint["z"]
-                } %>
+                <% gfp = graph && graph.fingerprint %>
                 <div>
                   <p class="text-xs font-medium text-base-content/50 mb-1.5">Credibility</p>
                   <div class="flex items-center gap-2 mb-2">
@@ -1331,35 +1328,62 @@ defmodule XwaWeb.GraphLive do
                       ></div>
                     </div>
                     <span class="text-xs text-base-content/50 tabular-nums">
-                      {Float.round(@selected_node.ilv_score, 3)}
+                      {to_string(Float.round(@selected_node.ilv_score, 3))}
                     </span>
                   </div>
                   <%= if @selected_node.ilv_fingerprint do %>
                     <% fp = @selected_node.ilv_fingerprint %>
+                    <% axis_labels = %{
+                      "w" => "W: (−) emotionally charged ↔ (+) bureaucratic",
+                      "x" => "X: (−) absolutist ↔ (+) hedged/qualified",
+                      "y" => "Y: (−) stacked claims ↔ (+) single focused claim",
+                      "z" => "Z: (−) one-sided ↔ (+) balanced/acknowledges tradeoffs"
+                    } %>
                     <%!-- Header row --%>
                     <div class="grid grid-cols-4 gap-1 text-center mb-0.5">
-                      <%= for dim <- [:w, :x, :y, :z] do %>
-                        <div class="text-[10px] text-base-content/30 uppercase"><%= dim %></div>
+                      <%= for dim_s <- ["w", "x", "y", "z"] do %>
+                        <div class="text-[10px] text-base-content/30 uppercase cursor-default" title={axis_labels[dim_s]}>{dim_s}</div>
                       <% end %>
                     </div>
-                    <%!-- Claim FP row --%>
-                    <div class="grid grid-cols-4 gap-1 text-center mb-1" title="Claim fingerprint">
-                      <%= for dim <- [:w, :x, :y, :z] do %>
-                        <div class="rounded bg-base-200 px-1 py-1 text-xs tabular-nums text-base-content/70">
-                          <%= Float.round(Map.get(fp, dim) || 0.0, 3) %>
-                        </div>
-                      <% end %>
-                    </div>
-                    <%!-- GFP row --%>
-                    <%= if gfp && gfp.w do %>
-                      <div class="grid grid-cols-4 gap-1 text-center" title="Graph fingerprint (GFP)">
-                        <%= for dim <- [:w, :x, :y, :z] do %>
+                    <%= if gfp && is_map(gfp["w"]) do %>
+                      <%!-- GFP median row --%>
+                      <div class="grid grid-cols-4 gap-1 text-center" title="Corpus median fingerprint">
+                        <%= for dim_s <- ["w", "x", "y", "z"] do %>
                           <div class="rounded bg-base-300/60 px-1 py-1 text-xs tabular-nums text-base-content/40">
-                            <%= Float.round(Map.get(gfp, dim) || 0.0, 3) %>
+                            {to_string(Float.round((gfp[dim_s]["median"] || 0.0) * 1.0, 3))}
                           </div>
                         <% end %>
                       </div>
                       <div class="mt-0.5 text-[10px] text-base-content/25 text-right">GFP</div>
+                    <% end %>
+                    <%!-- CFP row --%>
+                    <div class="grid grid-cols-4 gap-1 text-center mt-1" title="Claim fingerprint">
+                      <%= for dim <- [:w, :x, :y, :z] do %>
+                        <div class="rounded bg-base-200 px-1 py-1 text-xs tabular-nums text-base-content/70">
+                          {to_string(Float.round(Map.get(fp, dim) || 0.0, 3))}
+                        </div>
+                      <% end %>
+                    </div>
+                    <div class="mt-0.5 text-[10px] text-base-content/25 text-right">CFP</div>
+                    <%= if gfp && is_map(gfp["w"]) do %>
+                      <%!-- Z-score row: (cfp[d] - 0.5) / sd[d] --%>
+                      <div class="grid grid-cols-4 gap-1 text-center mt-1" title="Deviation from corpus median in standard deviation units">
+                        <%= for {dim, dim_s} <- Enum.zip([:w, :x, :y, :z], ["w", "x", "y", "z"]) do %>
+                          <% cfp_val = Map.get(fp, dim) || 0.5 %>
+                          <% sd = gfp[dim_s]["sd"] %>
+                          <% z = if sd && sd > 0, do: Float.round((cfp_val - 0.5) / sd, 2), else: nil %>
+                          <% color = cond do
+                               is_nil(z) -> "text-base-content/30"
+                               z > 1.0   -> "text-success/80"
+                               z < -1.0  -> "text-error/80"
+                               true      -> "text-base-content/70"
+                             end %>
+                          <div class={"rounded bg-base-200 px-1 py-1 text-xs tabular-nums #{color}"}>
+                            {if z, do: to_string(z), else: "—"}
+                          </div>
+                        <% end %>
+                      </div>
+                      <div class="mt-0.5 text-[10px] text-base-content/25 text-right">σ from median</div>
                     <% end %>
                   <% end %>
                 </div>
@@ -1595,14 +1619,14 @@ defmodule XwaWeb.GraphLive do
                 <div class="rounded-lg bg-base-200 px-3 py-2.5 text-xs text-base-content/70">
                   <%= cond do %>
                     <% prog && prog.phase == :phase1 -> %>
-                      Phase 1 — Scoring <%= prog.done %>/<%= prog.total %> claims&hellip;
+                      Phase 1 — Scoring {to_string(prog.done)}/{to_string(prog.total)} claims&hellip;
                       <div class="mt-1.5 h-1 bg-base-300 rounded-full overflow-hidden">
                         <div class="h-full bg-primary rounded-full transition-all" style={"width: #{if prog.total > 0, do: round(prog.done / prog.total * 100), else: 0}%"}></div>
                       </div>
                     <% prog && prog.phase == :phase2_start -> %>
                       GFP converged — starting final scoring&hellip;
                     <% prog && prog.phase == :phase2 -> %>
-                      Phase 2 — Finalizing <%= prog.done %>/<%= prog.total %> claims&hellip;
+                      Phase 2 — Finalizing {to_string(prog.done)}/{to_string(prog.total)} claims&hellip;
                       <div class="mt-1.5 h-1 bg-base-300 rounded-full overflow-hidden">
                         <div class="h-full bg-primary rounded-full transition-all" style={"width: #{if prog.total > 0, do: round(prog.done / prog.total * 100), else: 0}%"}></div>
                       </div>
