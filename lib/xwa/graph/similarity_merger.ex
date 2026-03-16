@@ -37,7 +37,7 @@ defmodule Xwa.Graph.SimilarityMerger do
 
   require Logger
 
-  alias Xwa.Graph.Nodes
+  alias Xwa.Graph.{Nodes, VectorMath}
 
   @default_threshold 0.92
   # Number of node-rows from graph_a to process concurrently
@@ -76,8 +76,8 @@ defmodule Xwa.Graph.SimilarityMerger do
         )
 
         # Pre-normalize all embeddings once to speed up dot products
-        normalized_a = Enum.map(pairs_a, fn {id, emb} -> {id, normalize(emb)} end)
-        normalized_b = Enum.map(pairs_b, fn {id, emb} -> {id, normalize(emb)} end)
+        normalized_a = Enum.map(pairs_a, fn {id, emb} -> {id, VectorMath.normalize(emb)} end)
+        normalized_b = Enum.map(pairs_b, fn {id, emb} -> {id, VectorMath.normalize(emb)} end)
 
         results =
           normalized_a
@@ -86,7 +86,7 @@ defmodule Xwa.Graph.SimilarityMerger do
             fn chunk ->
               Enum.flat_map(chunk, fn {id_a, emb_a} ->
                 Enum.flat_map(normalized_b, fn {id_b, emb_b} ->
-                  score = dot_product(emb_a, emb_b)
+                  score = VectorMath.dot_product(emb_a, emb_b)
                   if score >= threshold, do: [%{node_a: id_a, node_b: id_b, score: score}], else: []
                 end)
               end)
@@ -159,14 +159,4 @@ defmodule Xwa.Graph.SimilarityMerger do
     if root_a == root_b, do: parent, else: Map.put(parent, root_a, root_b)
   end
 
-  # Normalize a vector to unit length. Pre-normalizing means dot product = cosine similarity.
-  defp normalize(vec) do
-    magnitude = :math.sqrt(Enum.reduce(vec, 0.0, fn x, acc -> acc + x * x end))
-    if magnitude == 0.0, do: vec, else: Enum.map(vec, fn x -> x / magnitude end)
-  end
-
-  # Dot product of two pre-normalized vectors = cosine similarity.
-  defp dot_product(a, b) do
-    Enum.zip_reduce(a, b, 0.0, fn x, y, acc -> acc + x * y end)
-  end
 end

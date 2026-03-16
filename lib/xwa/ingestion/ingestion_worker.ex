@@ -8,10 +8,12 @@ defmodule Xwa.Ingestion.IngestionWorker do
   3. Extract claims via ClaimExtractor (Claude API) — logs ExtractionRun
   4. For each claim:
      a. Insert node into Memgraph
-     b. Fetch semantically relevant existing nodes
-     c. Extract edges via EdgeExtractor (Claude API) — logs ExtractionRun
-     d. Insert edges into Memgraph
-  5. Embed all new nodes in batch via Voyage AI — logs ExtractionRun
+     b. Embed node inline via Voyage AI (single call) — stores embedding immediately
+     c. Fetch neighbourhood: rank all existing embedded nodes by cosine similarity,
+        take top @neighbourhood_size as candidates for edge extraction
+     d. Extract edges via EdgeExtractor (Claude API) — logs ExtractionRun
+     e. Insert edges into Memgraph
+  5. Embed any remaining nodes without embeddings via Voyage AI — logs ExtractionRun
   6. Advance document ingestion_status to "complete" (or "failed")
 
   ## Usage
@@ -28,7 +30,7 @@ defmodule Xwa.Ingestion.IngestionWorker do
   require Logger
 
   alias Xwa.Documents
-  alias Xwa.Graph.{Nodes, Edges}
+  alias Xwa.Graph.{Nodes, Edges, VectorMath}
   alias Xwa.Ingestion.{ClaimExtractor, DocumentSegmenter, EdgeExtractor, ExtractionRuns, TextExtractor, VoyageEmbedder}
 
   @neighbourhood_size 20
@@ -303,7 +305,8 @@ defmodule Xwa.Ingestion.IngestionWorker do
 
   defp insert_node_with_edges(node, doc, context) do
     with {:ok, inserted_node} <- Nodes.create(node) do
-      neighbours = fetch_neighbourhood(inserted_node, doc, context.graph_id)
+      node_embedding = embed_node_inline(inserted_node)
+      neighbours = fetch_neighbourhood(inserted_node, node_embedding, doc, context.graph_id)
 
       t0 = System.monotonic_time(:millisecond)
 
@@ -428,7 +431,72 @@ defmodule Xwa.Ingestion.IngestionWorker do
     end
   end
 
-  defp fetch_neighbourhood(node, doc, graph_id) do
+  # Embeds a single node inline (before batch embed step) so cosine ranking works.
+  # Stores the embedding to Memgraph immediately; embed_nodes/3 will skip it.
+  defp embed_node_inline(node) do
+    text = node.summary || node.content
+
+    case VoyageEmbedder.embed([text]) do
+      {:ok, [embedding], _usage} ->
+        Nodes.set_embedding(node.id, embedding)
+        embedding
+
+      _ ->
+        nil
+    end
+  end
+
+  # With a valid embedding: rank all candidates by cosine similarity, return top N.
+  defp fetch_neighbourhood(node, node_embedding, doc, graph_id) when not is_nil(node_embedding) do
+    case Nodes.list_embeddings(graph_id) do
+      {:ok, []} ->
+        fetch_neighbourhood_unranked(node, doc, graph_id)
+
+      {:ok, embedding_pairs} ->
+        norm_new = VectorMath.normalize(node_embedding)
+
+        top_ids =
+          embedding_pairs
+          |> Enum.reject(fn {id, _} -> id == node.id end)
+          |> Enum.map(fn {id, emb} ->
+            score = VectorMath.dot_product(norm_new, VectorMath.normalize(emb))
+            {id, score}
+          end)
+          |> Enum.sort_by(fn {_, score} -> score end, :desc)
+          |> Enum.take(@neighbourhood_size)
+          |> Enum.map(fn {id, _} -> id end)
+          |> MapSet.new()
+
+        layer = doc.corpus_layer || node.corpus_layer
+
+        source =
+          if layer do
+            case Nodes.list_by_corpus_layer(graph_id, layer) do
+              {:ok, nodes} -> nodes
+              _ -> []
+            end
+          else
+            case Nodes.list(graph_id) do
+              {:ok, nodes} -> nodes
+              _ -> []
+            end
+          end
+
+        source
+        |> Enum.reject(&(&1.id == node.id))
+        |> Enum.filter(&MapSet.member?(top_ids, &1.id))
+
+      _ ->
+        fetch_neighbourhood_unranked(node, doc, graph_id)
+    end
+  end
+
+  # Fallback when no embedding available: original unranked behaviour.
+  defp fetch_neighbourhood(node, _node_embedding, doc, graph_id) do
+    fetch_neighbourhood_unranked(node, doc, graph_id)
+  end
+
+  defp fetch_neighbourhood_unranked(node, doc, graph_id) do
     layer = doc.corpus_layer || node.corpus_layer
 
     candidates =
@@ -453,8 +521,23 @@ defmodule Xwa.Ingestion.IngestionWorker do
   # Embedding
   # ---------------------------------------------------------------------------
 
-  defp embed_nodes(nodes, doc, graph_id) do
-    pairs = Enum.map(nodes, fn n -> {n.id, n.summary || n.content} end)
+  defp embed_nodes(_nodes, doc, graph_id) do
+    # Use list_missing_embeddings so nodes already embedded inline are skipped.
+    pairs =
+      case Nodes.list_missing_embeddings(graph_id) do
+        {:ok, missing} -> missing
+        _ -> []
+      end
+
+    if pairs == [] do
+      Logger.info("[Ingestion] All nodes already embedded for document #{doc.id}")
+      :ok
+    else
+      do_embed_nodes(pairs, doc, graph_id)
+    end
+  end
+
+  defp do_embed_nodes(pairs, doc, graph_id) do
     t0 = System.monotonic_time(:millisecond)
 
     case VoyageEmbedder.embed_keyed(pairs) do
