@@ -70,7 +70,7 @@ defmodule Xwa.Graph.Calibrator do
          {:ok, raw_fps} <- phase1(claims, broadcast, graph_id),
          {api_gfp, stored_gfp, iterations} <- converge(raw_fps),
          _ <- broadcast(broadcast, graph_id, {:calibration_progress, :phase2_start, %{gfp: api_gfp, iterations: iterations}}),
-         {:ok, scored} <- phase2(claims, api_gfp, broadcast, graph_id),
+         {:ok, scored} <- phase2(claims, api_gfp, stored_gfp, broadcast, graph_id),
          {:ok, _graph} <- Graphs.update_fingerprint(graph_id, stringify_fp(stored_gfp)) do
       broadcast(broadcast, graph_id, {:calibration_complete, %{gfp: api_gfp, scored: scored, iterations: iterations}})
       {:ok, %{gfp: api_gfp, scored: scored, iterations: iterations}}
@@ -207,17 +207,23 @@ defmodule Xwa.Graph.Calibrator do
   # Phase 2 — N parallel API calls with converged GFP; store results
   # ---------------------------------------------------------------------------
 
-  defp phase2(claims, gfp, broadcast, graph_id) do
+  defp phase2(claims, gfp, stored_gfp, broadcast, graph_id) do
     total = length(claims)
     done_ref = :counters.new(1, [])
 
     scored =
       claims
       |> Task.async_stream(
-        fn %{id: id, content: content} ->
+        fn %{id: id, content: content, confidence: base_conf} ->
           case IlvScorer.score(content, gfp) do
-            {:ok, %{score: score, fingerprint: fp}} -> {:ok, {id, score * 1.0, fp}}
-            {:error, reason} -> {:error, {id, reason}}
+            {:ok, %{score: score, fingerprint: fp}} ->
+              sfms = compute_sfms(fp, stored_gfp)
+              adj_conf = adjusted_confidence(base_conf, score, sfms)
+              g_flag = gaming_flag?(sfms)
+              {:ok, {id, score * 1.0, fp, adj_conf, g_flag}}
+
+            {:error, reason} ->
+              {:error, {id, reason}}
           end
         end,
         max_concurrency: @concurrency,
@@ -226,8 +232,8 @@ defmodule Xwa.Graph.Calibrator do
         on_timeout: :kill_task
       )
       |> Enum.reduce(0, fn
-        {:ok, {:ok, {id, score, fp}}}, count ->
-          case Nodes.set_ilv(id, score, fp) do
+        {:ok, {:ok, {id, score, fp, adj_conf, g_flag}}}, count ->
+          case Nodes.set_ilv(id, score, fp, adj_conf, g_flag) do
             :ok ->
               done = :counters.add(done_ref, 1, 1) |> then(fn _ -> :counters.get(done_ref, 1) end)
               broadcast(broadcast, graph_id, {:calibration_progress, :phase2, %{done: done, total: total}})
@@ -248,6 +254,45 @@ defmodule Xwa.Graph.Calibrator do
       end)
 
     {:ok, scored}
+  end
+
+  # ---------------------------------------------------------------------------
+  # SFM / confidence / gaming computations
+  # ---------------------------------------------------------------------------
+
+  # σ from median for each axis: (cfp[d] - 0.5) / sd[d]
+  # stored_gfp has atom keys: %{w: %{median: f, sd: f}, ...}
+  defp compute_sfms(fp, stored_gfp) do
+    Map.new(@dims, fn d ->
+      cfp_val = Map.get(fp, d) || Map.get(fp, to_string(d)) || 0.5
+      entry = Map.get(stored_gfp, d)
+      sd = if is_map(entry), do: entry.sd, else: nil
+      sfm = if sd && sd > 0, do: (cfp_val - 0.5) / sd, else: 0.0
+      {d, sfm}
+    end)
+  end
+
+  # Confidence = base × ilv_score × (1 - neg_penalty)
+  # neg_penalty = Σ max(0, -sfm[d]) × 0.08, capped at 0.8 so confidence never zeroes out
+  defp adjusted_confidence(base_conf, ilv_score, sfms) do
+    neg_penalty =
+      sfms
+      |> Map.values()
+      |> Enum.reduce(0.0, fn sfm, acc -> acc + max(0.0, -sfm) * 0.08 end)
+      |> min(0.8)
+
+    (base_conf * ilv_score * (1.0 - neg_penalty))
+    |> max(0.0)
+    |> min(1.0)
+  end
+
+  # Gaming flag: net-positive SFM but a significant negative outlier on one axis.
+  # gaming_score = max(0, mean_sfm) × max(0, -min_sfm); flag when > 1.0
+  defp gaming_flag?(sfms) do
+    vals = Map.values(sfms)
+    mean_sfm = Enum.sum(vals) / length(vals)
+    min_sfm = Enum.min(vals)
+    max(0.0, mean_sfm) * max(0.0, -min_sfm) > 1.0
   end
 
   # ---------------------------------------------------------------------------

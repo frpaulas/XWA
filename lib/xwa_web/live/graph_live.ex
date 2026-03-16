@@ -1319,7 +1319,15 @@ defmodule XwaWeb.GraphLive do
                 <% graph = @current_scope && @current_scope.graph %>
                 <% gfp = graph && graph.fingerprint %>
                 <div>
-                  <p class="text-xs font-medium text-base-content/50 mb-1.5">Credibility</p>
+                  <div class="flex items-center justify-between mb-1.5">
+                    <p class="text-xs font-medium text-base-content/50">Credibility</p>
+                    <%= if @selected_node.gaming_flag do %>
+                      <span
+                        class="text-[10px] font-medium px-1.5 py-0.5 rounded bg-warning/20 text-warning cursor-default"
+                        title="Mixed-signal pattern: claim scores well overall but has a significant negative outlier on one axis"
+                      >⚠ mixed signal</span>
+                    <% end %>
+                  </div>
                   <div class="flex items-center gap-2 mb-2">
                     <div class="flex-1 h-1.5 rounded-full bg-base-300 overflow-hidden">
                       <div

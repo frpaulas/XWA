@@ -89,7 +89,10 @@ defmodule Xwa.Graph.Node do
     # ILV credibility score (0–1) and 4-D corpus fingerprint.
     # Populated by the calibration pipeline. nil until calibrated.
     ilv_score: nil,
-    ilv_fingerprint: nil
+    ilv_fingerprint: nil,
+    # True when the claim scores well overall (mean SFM > 0) but has a significant
+    # negative outlier on one axis — a potential mixed-signal / gaming pattern.
+    gaming_flag: false
   ]
 
   @type t :: %__MODULE__{
@@ -255,7 +258,8 @@ defmodule Xwa.Graph.Node do
       node_type: props["node_type"] || "claim",
       constituents: zip_constituents(props["constituent_node_ids"], props["constituent_graph_ids"]),
       ilv_score: props["ilv_score"],
-      ilv_fingerprint: atomize_ilv_fp(props["ilv_fingerprint"])
+      ilv_fingerprint: atomize_ilv_fp(props["ilv_fingerprint"]),
+      gaming_flag: props["gaming_flag"] || false
     }
   end
 

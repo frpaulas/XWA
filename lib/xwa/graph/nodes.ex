@@ -589,19 +589,22 @@ defmodule Xwa.Graph.Nodes do
   Returns all Claim nodes in a graph as `%{id: string, content: string}` maps.
   No visibility filtering — intended for internal calibration use only.
   """
-  @spec list_all_claims(String.t()) :: {:ok, [%{id: String.t(), content: String.t()}]} | {:error, any()}
+  @spec list_all_claims(String.t()) ::
+          {:ok, [%{id: String.t(), content: String.t(), confidence: float()}]} | {:error, any()}
   def list_all_claims(graph_id) when is_binary(graph_id) do
     cypher = """
     MATCH (n:Claim {graph_id: $graph_id})
     WHERE n.content IS NOT NULL AND n.content <> ''
-    RETURN n.id AS id, n.content AS content
+    RETURN n.id AS id, n.content AS content, coalesce(n.confidence, 1.0) AS confidence
     """
 
     case Graph.query(cypher, %{graph_id: graph_id}) do
       {:ok, rows} ->
         claims =
           rows
-          |> Enum.map(fn %{"id" => id, "content" => content} -> %{id: id, content: content} end)
+          |> Enum.map(fn %{"id" => id, "content" => content, "confidence" => conf} ->
+            %{id: id, content: content, confidence: conf * 1.0}
+          end)
           |> Enum.reject(fn %{content: c} -> is_nil(c) or String.trim(c) == "" end)
 
         {:ok, claims}
@@ -612,16 +615,21 @@ defmodule Xwa.Graph.Nodes do
   end
 
   @doc """
-  Stores the ILV score and fingerprint on a Claim node.
+  Stores the ILV score, fingerprint, adjusted confidence, and gaming flag on a Claim node.
   `fingerprint` should be `%{w: float, x: float, y: float, z: float}`.
+  `adjusted_confidence` replaces the node's existing confidence value.
+  `gaming_flag` is true when the claim scores well overall but has a significant negative
+  outlier on one axis — a potential mixed-signal pattern.
   """
-  @spec set_ilv(String.t(), float(), map()) :: :ok | {:error, any()}
-  def set_ilv(id, score, fingerprint)
+  @spec set_ilv(String.t(), float(), map(), float(), boolean()) :: :ok | {:error, any()}
+  def set_ilv(id, score, fingerprint, adjusted_confidence, gaming_flag)
       when is_binary(id) and is_float(score) and is_map(fingerprint) do
     cypher = """
     MATCH (n:Claim {id: $id})
     SET n.ilv_score = $score,
-        n.ilv_fingerprint = $fingerprint
+        n.ilv_fingerprint = $fingerprint,
+        n.confidence = $adjusted_confidence,
+        n.gaming_flag = $gaming_flag
     """
 
     Graph.run(cypher, %{
@@ -632,7 +640,9 @@ defmodule Xwa.Graph.Nodes do
         "x" => Map.get(fingerprint, :x) || Map.get(fingerprint, "x") || 0.5,
         "y" => Map.get(fingerprint, :y) || Map.get(fingerprint, "y") || 0.5,
         "z" => Map.get(fingerprint, :z) || Map.get(fingerprint, "z") || 0.5
-      }
+      },
+      adjusted_confidence: adjusted_confidence,
+      gaming_flag: gaming_flag
     })
   end
 
