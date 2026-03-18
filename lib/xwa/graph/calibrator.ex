@@ -272,27 +272,31 @@ defmodule Xwa.Graph.Calibrator do
     end)
   end
 
-  # Confidence = base × ilv_score × (1 - neg_penalty)
+  # Confidence = normalized_base × ilv_score × (1 - neg_penalty)
+  # base_conf from Claude is in [0.6, 1.0]; normalize to [0.0, 1.0] first
+  # (claims below 0.6 are already rejected at extraction time).
   # neg_penalty = Σ max(0, -sfm[d]) × 0.08, capped at 0.8 so confidence never zeroes out
   defp adjusted_confidence(base_conf, ilv_score, sfms) do
+    normalized_base = (base_conf - 0.6) / 0.4
+
     neg_penalty =
       sfms
       |> Map.values()
       |> Enum.reduce(0.0, fn sfm, acc -> acc + max(0.0, -sfm) * 0.08 end)
       |> min(0.8)
 
-    (base_conf * ilv_score * (1.0 - neg_penalty))
+    (normalized_base * ilv_score * (1.0 - neg_penalty))
     |> max(0.0)
     |> min(1.0)
   end
 
   # Gaming flag: net-positive SFM but a significant negative outlier on one axis.
-  # gaming_score = max(0, mean_sfm) × max(0, -min_sfm); flag when > 1.0
+  # gaming_score = max(0, mean_sfm) × max(0, -min_sfm); flag when > 0.3
   defp gaming_flag?(sfms) do
     vals = Map.values(sfms)
     mean_sfm = Enum.sum(vals) / length(vals)
     min_sfm = Enum.min(vals)
-    max(0.0, mean_sfm) * max(0.0, -min_sfm) > 1.0
+    max(0.0, mean_sfm) * max(0.0, -min_sfm) > 0.3
   end
 
   # ---------------------------------------------------------------------------
