@@ -90,6 +90,10 @@ defmodule Xwa.Graph.Node do
     # Populated by the calibration pipeline. nil until calibrated.
     ilv_score: nil,
     ilv_fingerprint: nil,
+    # ILV-adjusted confidence: (0.4 × normalized_base + 0.6 × ilv_score) × (1 - sfm_penalty).
+    # Stored separately from `confidence` (Claude extraction value, immutable after creation)
+    # so recalibration always reads the original Claude value as base, not its own prior output.
+    ilv_confidence: nil,
     # True when the claim scores well overall (mean SFM > 0) but has a significant
     # negative outlier on one axis — a potential mixed-signal / gaming pattern.
     gaming_flag: false
@@ -259,6 +263,7 @@ defmodule Xwa.Graph.Node do
       constituents: zip_constituents(props["constituent_node_ids"], props["constituent_graph_ids"]),
       ilv_score: props["ilv_score"],
       ilv_fingerprint: atomize_ilv_fp(props["ilv_fingerprint"]),
+      ilv_confidence: props["ilv_confidence"],
       gaming_flag: props["gaming_flag"] || false
     }
   end

@@ -689,7 +689,7 @@ defmodule XwaWeb.GraphLive do
             type: n.type || "unknown",
             node_type: n.node_type || "claim",
             corpus_layer: n.corpus_layer || "unknown",
-            confidence: n.confidence || 1.0,
+            confidence: n.ilv_confidence || n.confidence || 1.0,
             human_validated: n.human_validated || false,
             contested: n.contested || false
           }
@@ -1404,12 +1404,12 @@ defmodule XwaWeb.GraphLive do
                   <div class="flex-1 h-1.5 rounded-full bg-base-300 overflow-hidden">
                     <div
                       class="h-full rounded-full bg-primary transition-all"
-                      style={"width: #{round((@selected_node.confidence || 1.0) * 100)}%"}
+                      style={"width: #{round((@selected_node.ilv_confidence || @selected_node.confidence || 1.0) * 100)}%"}
                     >
                     </div>
                   </div>
                   <span class="text-xs text-base-content/50 tabular-nums">
-                    {Float.round(@selected_node.confidence || 1.0, 2)}
+                    {Float.round(@selected_node.ilv_confidence || @selected_node.confidence || 1.0, 2)}
                   </span>
                 </div>
               </div>

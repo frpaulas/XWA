@@ -615,20 +615,21 @@ defmodule Xwa.Graph.Nodes do
   end
 
   @doc """
-  Stores the ILV score, fingerprint, adjusted confidence, and gaming flag on a Claim node.
+  Stores the ILV score, fingerprint, ILV-adjusted confidence, and gaming flag on a Claim node.
   `fingerprint` should be `%{w: float, x: float, y: float, z: float}`.
-  `adjusted_confidence` replaces the node's existing confidence value.
+  `ilv_confidence` is stored in a separate field from `confidence` (which holds the original
+  Claude extraction value, immutable) so recalibration always uses the original as its base.
   `gaming_flag` is true when the claim scores well overall but has a significant negative
   outlier on one axis — a potential mixed-signal pattern.
   """
   @spec set_ilv(String.t(), float(), map(), float(), boolean()) :: :ok | {:error, any()}
-  def set_ilv(id, score, fingerprint, adjusted_confidence, gaming_flag)
+  def set_ilv(id, score, fingerprint, ilv_confidence, gaming_flag)
       when is_binary(id) and is_float(score) and is_map(fingerprint) do
     cypher = """
     MATCH (n:Claim {id: $id})
     SET n.ilv_score = $score,
         n.ilv_fingerprint = $fingerprint,
-        n.confidence = $adjusted_confidence,
+        n.ilv_confidence = $ilv_confidence,
         n.gaming_flag = $gaming_flag
     """
 
@@ -641,7 +642,7 @@ defmodule Xwa.Graph.Nodes do
         "y" => Map.get(fingerprint, :y) || Map.get(fingerprint, "y") || 0.5,
         "z" => Map.get(fingerprint, :z) || Map.get(fingerprint, "z") || 0.5
       },
-      adjusted_confidence: adjusted_confidence,
+      ilv_confidence: ilv_confidence,
       gaming_flag: gaming_flag
     })
   end
