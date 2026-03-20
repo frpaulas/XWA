@@ -43,7 +43,7 @@ defmodule Xwa.Graph.Calibrator do
   alias Xwa.Ingestion.IlvScorer
 
   @dims [:w, :x, :y, :z]
-  @concurrency 10
+  @concurrency 50
 
   # ---------------------------------------------------------------------------
   # Public API
