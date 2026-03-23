@@ -272,23 +272,19 @@ defmodule Xwa.Graph.Calibrator do
     end)
   end
 
-  # Confidence = (0.4 × normalized_base + 0.6 × ilv_score) × (1 - neg_penalty)
-  # ILV drives most of the score; Claude's extraction confidence is a secondary modifier.
-  # base_conf from Claude is in [0.6, 1.0]; normalize to [0.2, 1.0] so the minimum
-  # passing claim has a floor of 0.2 rather than 0.0 (fairer visual representation).
+  # Confidence = ilv_score × (1 - neg_penalty)
+  # ILV score is the sole credibility signal; Claude extraction confidence gates ingestion
+  # (claims below 0.6 are rejected) but is not used in the calibrated score — it was
+  # corrupted by earlier calibration runs that overwrote n.confidence.
   # neg_penalty = Σ max(0, -sfm[d]) × 0.08, capped at 0.8 so confidence never zeroes out
-  defp adjusted_confidence(base_conf, ilv_score, sfms) do
-    normalized_base = 0.2 + (base_conf - 0.6) * 2.0
-
+  defp adjusted_confidence(_base_conf, ilv_score, sfms) do
     neg_penalty =
       sfms
       |> Map.values()
       |> Enum.reduce(0.0, fn sfm, acc -> acc + max(0.0, -sfm) * 0.08 end)
       |> min(0.8)
 
-    blended = 0.4 * normalized_base + 0.6 * ilv_score
-
-    (blended * (1.0 - neg_penalty))
+    (ilv_score * (1.0 - neg_penalty))
     |> max(0.0)
     |> min(1.0)
   end
