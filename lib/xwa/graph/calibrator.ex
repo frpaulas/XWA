@@ -272,21 +272,13 @@ defmodule Xwa.Graph.Calibrator do
     end)
   end
 
-  # Confidence = ilv_score × (1 - neg_penalty)
-  # ILV score is the sole credibility signal; Claude extraction confidence gates ingestion
-  # (claims below 0.6 are rejected) but is not used in the calibrated score — it was
-  # corrupted by earlier calibration runs that overwrote n.confidence.
-  # neg_penalty = Σ max(0, -sfm[d]) × 0.08, capped at 0.8 so confidence never zeroes out
-  defp adjusted_confidence(_base_conf, ilv_score, sfms) do
-    neg_penalty =
-      sfms
-      |> Map.values()
-      |> Enum.reduce(0.0, fn sfm, acc -> acc + max(0.0, -sfm) * 0.08 end)
-      |> min(0.8)
-
-    (ilv_score * (1.0 - neg_penalty))
-    |> max(0.0)
-    |> min(1.0)
+  # Confidence = ilv_score, unmodified.
+  # SFM-based penalty is dropped — for a well-calibrated corpus, ~half of axes are
+  # always negative (symmetric distribution around the median), so the penalty
+  # drags down all nodes indiscriminately. Mixed-signal detection is handled
+  # separately by gaming_flag.
+  defp adjusted_confidence(_base_conf, ilv_score, _sfms) do
+    ilv_score
   end
 
   # Gaming flag: net-positive SFM but a significant negative outlier on one axis.

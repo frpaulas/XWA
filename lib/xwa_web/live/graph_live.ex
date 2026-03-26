@@ -1,7 +1,7 @@
 defmodule XwaWeb.GraphLive do
   use XwaWeb, :live_view
 
-  alias Xwa.Graph.{Nodes, Edges, FocusScorer}
+  alias Xwa.Graph.{Nodes, Edges, Topics, FocusScorer}
   alias Xwa.{Documents, Graphs}
   alias Xwa.Ingestion.CalibrationWorker
 
@@ -21,6 +21,7 @@ defmodule XwaWeb.GraphLive do
       |> assign(:filter_layer, "all")
       |> assign(:filter_type, "all")
       |> assign(:filter_min_degree, 2)
+      |> assign(:filter_min_importance, 0.0)
       |> assign(:hide_isolated, true)
       |> assign(:search, "")
       |> assign(:nodes, [])
@@ -44,6 +45,9 @@ defmodule XwaWeb.GraphLive do
       |> assign(:calibration_status, :idle)
       |> assign(:calibration_confirm, false)
       |> assign(:calibration_progress, nil)
+      |> assign(:topic_nodes, [])
+      |> assign(:topic_edges, [])
+      |> assign(:belongs_to_edges, [])
       |> assign_new(:read_only, fn -> false end)
       |> assign_new(:viewer, fn -> nil end)
 
@@ -293,10 +297,21 @@ defmodule XwaWeb.GraphLive do
     end
   end
 
+  def handle_event("toggle_topic_view", _params, socket) do
+    {:noreply, push_topic_data(socket)}
+  end
+
+  def handle_event("reload_topics", _params, socket) do
+    Process.send_after(self(), :reload_topics, 0)
+    {:noreply, socket}
+  end
+
   @impl true
   def handle_info(:load_graph, socket) do
     user_id = socket.assigns.current_scope.user.id
     graph_id = socket.assigns.current_scope.graph_id
+    graph = socket.assigns.current_scope.graph
+    org_id = graph && graph.organization_id
 
     {nodes, edges} =
       if graph_id do
@@ -322,6 +337,17 @@ defmodule XwaWeb.GraphLive do
         {[], []}
       end
 
+    {topic_nodes, topic_edges, belongs_to_edges} =
+      if org_id && graph_id do
+        graph_ids = Graphs.resolve_graph_ids(graph_id)
+        tn = case Topics.list(org_id) do {:ok, t} -> t; _ -> [] end
+        te = case Topics.list_topic_edges(org_id) do {:ok, t} -> t; _ -> [] end
+        be = case Topics.list_belongs_to_edges(graph_ids) do {:ok, b} -> b; _ -> [] end
+        {tn, te, be}
+      else
+        {[], [], []}
+      end
+
     min_degree = auto_threshold(nodes, edges)
 
     socket =
@@ -329,6 +355,9 @@ defmodule XwaWeb.GraphLive do
       |> assign(:loading, false)
       |> assign(:nodes, nodes)
       |> assign(:all_edges, edges)
+      |> assign(:topic_nodes, topic_nodes)
+      |> assign(:topic_edges, topic_edges)
+      |> assign(:belongs_to_edges, belongs_to_edges)
       |> apply_filters(socket.assigns.filter_layer, socket.assigns.filter_type, socket.assigns.search, min_degree, true)
 
     {:noreply, socket}
@@ -446,6 +475,32 @@ defmodule XwaWeb.GraphLive do
      |> assign(:calibration_status, :idle)
      |> assign(:calibration_progress, nil)
      |> put_flash(:error, "Calibration failed: #{inspect(reason)}")}
+  end
+
+  def handle_info(:reload_topics, socket) do
+    graph_id = socket.assigns.current_scope.graph_id
+    graph = socket.assigns.current_scope.graph
+    org_id = graph && graph.organization_id
+
+    {topic_nodes, topic_edges, belongs_to_edges} =
+      if org_id && graph_id do
+        graph_ids = Graphs.resolve_graph_ids(graph_id)
+        tn = case Topics.list(org_id) do {:ok, t} -> t; _ -> [] end
+        te = case Topics.list_topic_edges(org_id) do {:ok, t} -> t; _ -> [] end
+        be = case Topics.list_belongs_to_edges(graph_ids) do {:ok, b} -> b; _ -> [] end
+        {tn, te, be}
+      else
+        {[], [], []}
+      end
+
+    socket =
+      socket
+      |> assign(:topic_nodes, topic_nodes)
+      |> assign(:topic_edges, topic_edges)
+      |> assign(:belongs_to_edges, belongs_to_edges)
+      |> push_topic_data()
+
+    {:noreply, socket}
   end
 
   def handle_info(_msg, socket), do: {:noreply, socket}
@@ -581,6 +636,15 @@ defmodule XwaWeb.GraphLive do
     {:noreply, socket}
   end
 
+  def handle_event("filter_min_importance", %{"min_importance" => val}, socket) do
+    min_importance = String.to_float(val)
+    socket =
+      socket
+      |> assign(:filter_min_importance, min_importance)
+      |> push_event("importance_threshold_changed", %{min_importance: min_importance})
+    {:noreply, socket}
+  end
+
   def handle_event("toggle_isolated", _params, socket) do
     hide = !socket.assigns.hide_isolated
     socket =
@@ -633,9 +697,12 @@ defmodule XwaWeb.GraphLive do
     # Pass min_degree to the JS hook so it can hide low-degree nodes via CSS
     # display:none rather than removing them from Cytoscape's element set.
     # This keeps all nodes available for neighborhood display.
+    min_importance = socket.assigns.filter_min_importance
+
     event_data =
       graph_data
       |> Map.put(:min_degree, min_degree)
+      |> Map.put(:min_importance, min_importance)
       |> Map.put(:graph_id, socket.assigns.current_scope.graph_id)
       |> Map.put(:layer, layer)
       |> Map.put(:type, type)
@@ -648,6 +715,7 @@ defmodule XwaWeb.GraphLive do
     |> assign(:search, search)
     |> assign(:graph_data, graph_data)
     |> push_event("graph_loaded", event_data)
+    |> push_topic_data()
   end
 
   # Push canvas overlay events to the hook whenever neighborhood or focus changes.
@@ -657,6 +725,36 @@ defmodule XwaWeb.GraphLive do
     socket
     |> push_event("neighborhood_changed", socket.assigns.neighborhood || %{})
     |> push_event("focus_changed", %{neighborhoods: socket.assigns.focus_neighborhoods || []})
+  end
+
+  # Pushes topic data to the JS hook so it can update the topic overlay.
+  defp push_topic_data(socket) do
+    topic_nodes = socket.assigns.topic_nodes
+    topic_edges = socket.assigns.topic_edges
+    belongs_to_edges = socket.assigns.belongs_to_edges
+
+    topic_node_data =
+      Enum.map(topic_nodes, fn n ->
+        %{data: %{id: n.id, label: n.content, node_type: "topic", theme: n.theme, confidence: 1.0}}
+      end)
+
+    topic_edge_data =
+      Enum.map(topic_edges, fn e ->
+        %{data: %{id: e.id, source: e.from_node_id, target: e.to_node_id,
+                  type: e.type || "relates", certainty: e.certainty || "dashed",
+                  confidence: e.confidence || 0.7, importance: e.importance || 0.5}}
+      end)
+
+    belongs_to_data =
+      Enum.map(belongs_to_edges, fn e ->
+        %{data: %{id: e.id, source: e.from_node_id, target: e.to_node_id, type: "belongs_to"}}
+      end)
+
+    push_event(socket, "topic_data", %{
+      topic_nodes: topic_node_data,
+      topic_edges: topic_edge_data,
+      belongs_to_edges: belongs_to_data
+    })
   end
 
   defp composite_id(socket) do
@@ -691,7 +789,9 @@ defmodule XwaWeb.GraphLive do
             corpus_layer: n.corpus_layer || "unknown",
             confidence: n.ilv_confidence || n.confidence || 1.0,
             human_validated: n.human_validated || false,
-            contested: n.contested || false
+            contested: n.contested || false,
+            theme: n.theme,
+            theme_confidence: n.theme_confidence
           }
         }
       end)
@@ -707,6 +807,7 @@ defmodule XwaWeb.GraphLive do
             type: e.type || "relates",
             certainty: e.certainty || "dashed",
             confidence: e.confidence || 0.5,
+            importance: e.importance || 0.5,
             cross_graph: cross_graph
           }
         }
@@ -938,6 +1039,27 @@ defmodule XwaWeb.GraphLive do
               <div class="flex justify-between text-xs text-base-content/30 mt-0.5">
                 <span>All</span>
                 <span>10+</span>
+              </div>
+            </div>
+
+            <%!-- Min edge importance slider --%>
+            <div class="mb-4">
+              <div class="flex items-center justify-between mb-1.5">
+                <p class="text-xs font-medium text-base-content/50">Min edge importance</p>
+                <span id="cy-importance-label" class="text-xs font-semibold text-primary"><%= Float.round(@filter_min_importance, 2) %></span>
+              </div>
+              <input
+                id="cy-importance-slider"
+                type="range"
+                min="0" max="1" step="0.05"
+                value={@filter_min_importance}
+                phx-hook="ImportanceSlider"
+                phx-update="ignore"
+                class="w-full accent-primary"
+              />
+              <div class="flex justify-between text-xs text-base-content/30 mt-0.5">
+                <span>All</span>
+                <span>Strong only</span>
               </div>
             </div>
 
@@ -1186,6 +1308,14 @@ defmodule XwaWeb.GraphLive do
               </button>
             </div>
           <% end %>
+          <%!-- Theme browser panel --%>
+          <%= if length(@topic_nodes) > 0 do %>
+            <div
+              id="cy-theme-panel"
+              style="display:none;max-height:420px"
+              class="absolute bottom-14 right-3 z-30 w-72 rounded-xl border border-base-300 bg-base-100 p-3 shadow-xl overflow-y-auto"
+            ></div>
+          <% end %>
           <%!-- Save view dialog: hidden for read-only visitors --%>
           <%= if !@read_only do %>
             <div
@@ -1215,11 +1345,33 @@ defmodule XwaWeb.GraphLive do
                 title="Save current view (layout + filters)"
               >Save view</button>
             <% end %>
+            <%= if length(@topic_nodes) > 0 do %>
+              <button
+                id="cy-topic-toggle"
+                onclick="document.getElementById('cy').dispatchEvent(new CustomEvent('toggle-topic-view'))"
+                class="rounded-lg bg-base-100/90 border border-base-200 px-2.5 py-1 text-xs text-base-content/50 backdrop-blur-sm hover:text-base-content hover:border-base-300 transition-colors"
+                title="Browse themes"
+              >Themes</button>
+              <button
+                id="cy-theme-filter-badge"
+                onclick="document.getElementById('cy').dispatchEvent(new CustomEvent('clear-theme-filter'))"
+                style="display:none"
+                class="rounded-lg bg-emerald-500/15 border border-emerald-300 px-2.5 py-1 text-xs text-emerald-700 backdrop-blur-sm hover:bg-emerald-500/25 transition-colors"
+                title="Clear theme filter"
+              ></button>
+            <% end %>
             <button
               onclick="document.getElementById('cy').dispatchEvent(new CustomEvent('reset-layout'))"
               class="rounded-lg bg-base-100/90 border border-base-200 px-2.5 py-1 text-xs text-base-content/50 backdrop-blur-sm hover:text-base-content hover:border-base-300 transition-colors"
               title="Clear saved layout and rerun auto-layout"
             >Reset layout</button>
+            <button
+              id="cy-isolated-badge"
+              onclick="document.getElementById('cy').dispatchEvent(new CustomEvent('toggle-isolated-highlight'))"
+              style="display:none"
+              class="rounded-lg bg-red-500/10 border border-red-400/40 px-2.5 py-1 text-xs text-red-400 backdrop-blur-sm hover:bg-red-500/20 transition-colors"
+              title="Claims with no connections — click to highlight"
+            ></button>
             <div id="cy-graph-stats" class="rounded-lg bg-base-100/90 border border-base-200 px-2.5 py-1 text-xs text-base-content/50 backdrop-blur-sm">
               {@graph_data.nodes |> length()} nodes · {@graph_data.edges |> length()} edges
             </div>

@@ -512,6 +512,7 @@ defmodule Xwa.Graph.Nodes do
     cypher = """
     MATCH (n:Claim)
     WHERE n.graph_id IN $graph_ids AND n.embedding IS NOT NULL
+      AND n.node_type <> 'topic'
     RETURN n.id AS id, n.embedding AS embedding
     """
 
@@ -582,6 +583,48 @@ defmodule Xwa.Graph.Nodes do
   end
 
   # ---------------------------------------------------------------------------
+  # Topic nodes (org-scoped, graph_id: nil)
+  # ---------------------------------------------------------------------------
+
+  @doc """
+  Returns all topic nodes for a given organization.
+  """
+  @spec list_topics(String.t()) :: {:ok, [Node.t()]} | {:error, any()}
+  def list_topics(org_id) when is_binary(org_id) do
+    cypher = """
+    MATCH (n:Claim {node_type: "topic", organization_id: $org_id})
+    RETURN n
+    """
+
+    case Graph.query(cypher, %{org_id: org_id}) do
+      {:ok, rows} -> {:ok, Enum.map(rows, &node_from_row/1)}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @doc """
+  Returns `{id, embedding}` pairs for all topic nodes in the given organization.
+  """
+  @spec list_topic_embeddings(String.t()) ::
+          {:ok, [{String.t(), [float()]}]} | {:error, any()}
+  def list_topic_embeddings(org_id) when is_binary(org_id) do
+    cypher = """
+    MATCH (n:Claim {node_type: "topic", organization_id: $org_id})
+    WHERE n.embedding IS NOT NULL
+    RETURN n.id AS id, n.embedding AS embedding
+    """
+
+    case Graph.query(cypher, %{org_id: org_id}) do
+      {:ok, rows} ->
+        pairs = Enum.map(rows, fn %{"id" => id, "embedding" => emb} -> {id, emb} end)
+        {:ok, pairs}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  # ---------------------------------------------------------------------------
   # ILV calibration
   # ---------------------------------------------------------------------------
 
@@ -611,6 +654,36 @@ defmodule Xwa.Graph.Nodes do
 
       {:error, reason} ->
         {:error, reason}
+    end
+  end
+
+  @doc """
+  Stores the theme and theme_confidence directly on a claim node.
+  `theme_confidence` is a float 0.0–1.0; nil means not yet classified.
+  """
+  @spec set_theme(String.t(), String.t(), float()) :: :ok | {:error, any()}
+  def set_theme(id, theme, confidence) when is_binary(id) and is_binary(theme) and is_float(confidence) do
+    Graph.run(
+      "MATCH (n:Claim {id: $id}) SET n.theme = $theme, n.theme_confidence = $confidence",
+      %{id: id, theme: theme, confidence: confidence}
+    )
+  end
+
+  @doc """
+  Returns the distinct theme strings assigned to claim nodes in a graph.
+  Used by inline classification to determine if themes exist yet.
+  """
+  @spec list_distinct_themes(String.t()) :: {:ok, [String.t()]} | {:error, any()}
+  def list_distinct_themes(graph_id) when is_binary(graph_id) do
+    cypher = """
+    MATCH (n:Claim {graph_id: $graph_id})
+    WHERE n.theme IS NOT NULL AND n.node_type <> 'topic'
+    RETURN DISTINCT n.theme AS theme
+    """
+
+    case Graph.query(cypher, %{graph_id: graph_id}) do
+      {:ok, rows} -> {:ok, Enum.map(rows, fn %{"theme" => t} -> t end)}
+      error -> error
     end
   end
 

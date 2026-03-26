@@ -30,8 +30,9 @@ defmodule Xwa.Ingestion.IngestionWorker do
   require Logger
 
   alias Xwa.Documents
-  alias Xwa.Graph.{Nodes, Edges, VectorMath}
-  alias Xwa.Ingestion.{ClaimExtractor, DocumentSegmenter, EdgeExtractor, ExtractionRuns, TextExtractor, VoyageEmbedder}
+  alias Xwa.Graphs
+  alias Xwa.Graph.{Nodes, Edges, Topics, VectorMath}
+  alias Xwa.Ingestion.{ClaimExtractor, DocumentSegmenter, EdgeExtractor, ExtractionRuns, TextExtractor, ThemeClassifier, TopicExtractor, VoyageEmbedder}
 
   @neighbourhood_size 20
   @prompt_version "v1"
@@ -48,12 +49,14 @@ defmodule Xwa.Ingestion.IngestionWorker do
   def run(document_id, requesting_user_id, graph_id) do
     Logger.info("[Ingestion] Starting ingestion for document #{document_id}")
 
+    org_id = resolve_org_id(graph_id)
+
     result =
       with {:ok, doc, text} <- load_content(document_id, requesting_user_id),
            :ok <- advance_status(doc, "processing"),
            {:ok, nodes} <- extract_all_claims(doc, text, requesting_user_id, graph_id),
            :ok <- broadcast_progress(graph_id, document_id, length(nodes), 0),
-           {:ok, edge_count} <- insert_nodes_and_edges(nodes, doc, requesting_user_id, graph_id),
+           {:ok, edge_count} <- insert_nodes_and_edges(nodes, doc, requesting_user_id, graph_id, org_id),
            :ok <- broadcast_progress(graph_id, document_id, length(nodes), edge_count),
            :ok <- insert_wiki_links(text, nodes, doc, requesting_user_id, graph_id),
            :ok <- embed_nodes(nodes, doc, graph_id) do
@@ -288,10 +291,11 @@ defmodule Xwa.Ingestion.IngestionWorker do
     end
   end
 
-  defp insert_nodes_and_edges(nodes, doc, requesting_user_id, graph_id) do
+  defp insert_nodes_and_edges(nodes, doc, requesting_user_id, graph_id, org_id) do
     context = %{
       document_id: doc.id,
       graph_id: graph_id,
+      org_id: org_id,
       created_by: requesting_user_id
     }
 
@@ -306,6 +310,8 @@ defmodule Xwa.Ingestion.IngestionWorker do
   defp insert_node_with_edges(node, doc, context) do
     with {:ok, inserted_node} <- Nodes.create(node) do
       node_embedding = embed_node_inline(inserted_node)
+      assign_topic_async(inserted_node, context)
+      assign_theme_async(inserted_node, context)
       neighbours = fetch_neighbourhood(inserted_node, node_embedding, doc, context.graph_id)
 
       t0 = System.monotonic_time(:millisecond)
@@ -428,6 +434,94 @@ defmodule Xwa.Ingestion.IngestionWorker do
       end)
 
       :ok
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # Topic assignment
+  # ---------------------------------------------------------------------------
+
+  # Fire-and-forget: extract a topic label and assign the node to it.
+  # Runs in a supervised task so a topic API failure doesn't block ingestion.
+  defp assign_topic_async(_node, %{org_id: nil}), do: :ok
+
+  defp assign_topic_async(node, context) do
+    Task.Supervisor.start_child(Xwa.TaskSupervisor, fn ->
+      claim_text = node.summary || node.content
+
+      case TopicExtractor.extract_topic(claim_text) do
+        {:ok, topic_label} ->
+          case Topics.find_or_create(topic_label, context.org_id, created_by: context.created_by) do
+            {:ok, topic_node, :created} ->
+              Logger.info("[Ingestion] Created topic '#{topic_label}' for org #{context.org_id}")
+              Topics.assign_topic(node.id, topic_node.id, context.graph_id, context.created_by)
+              # Propose topic→topic edges for the newly created topic
+              case Nodes.list_topics(context.org_id) do
+                {:ok, existing} ->
+                  others = Enum.reject(existing, &(&1.id == topic_node.id))
+                  case TopicExtractor.extract_topic_edges(topic_node, others) do
+                    {:ok, edges} ->
+                      Topics.create_topic_edges(edges, context.org_id, context.created_by)
+                    {:error, reason} ->
+                      Logger.warning("[Ingestion] Topic edge extraction failed: #{inspect(reason)}")
+                  end
+                _ -> :ok
+              end
+
+            {:ok, topic_node, :existing} ->
+              Topics.assign_topic(node.id, topic_node.id, context.graph_id, context.created_by)
+
+            {:error, reason} ->
+              Logger.warning("[Ingestion] Topic find_or_create failed for '#{topic_label}': #{inspect(reason)}")
+          end
+
+        {:error, reason} ->
+          Logger.warning("[Ingestion] Topic extraction failed for node #{node.id}: #{inspect(reason)}")
+      end
+    end)
+
+    :ok
+  end
+
+  # ---------------------------------------------------------------------------
+  # Theme assignment
+  # ---------------------------------------------------------------------------
+
+  # Fire-and-forget: classify the claim against the graph's existing themes.
+  # No-ops if no themes have been assigned to the graph yet.
+  defp assign_theme_async(node, context) do
+    Task.Supervisor.start_child(Xwa.TaskSupervisor, fn ->
+      case Nodes.list_distinct_themes(context.graph_id) do
+        {:ok, []} ->
+          :ok
+
+        {:ok, themes} ->
+          claim_text = node.summary || node.content
+
+          case ThemeClassifier.classify(claim_text, themes) do
+            {:ok, {theme, confidence}} ->
+              Nodes.set_theme(node.id, theme, confidence)
+
+              if theme == "unclassified" do
+                Logger.info("[Ingestion] Node #{node.id} did not fit any theme (confidence #{confidence}) — consider regenerating themes")
+              end
+
+            {:error, reason} ->
+              Logger.warning("[Ingestion] Theme classification failed for node #{node.id}: #{inspect(reason)}")
+          end
+
+        {:error, reason} ->
+          Logger.warning("[Ingestion] Failed to load themes for graph #{context.graph_id}: #{inspect(reason)}")
+      end
+    end)
+
+    :ok
+  end
+
+  defp resolve_org_id(graph_id) do
+    case Graphs.get_graph(graph_id) do
+      %{organization_id: org_id} -> org_id
+      _ -> nil
     end
   end
 

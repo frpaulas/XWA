@@ -32,7 +32,7 @@ defmodule Xwa.Graph.Node do
 
   @source_types ~w(aspirational operational external)
   @corpus_layers ~w(self_description internal_record external_context)
-  @node_types ~w(claim synthesis concept)
+  @node_types ~w(claim synthesis concept topic)
 
   defstruct [
     # Identity
@@ -75,7 +75,9 @@ defmodule Xwa.Graph.Node do
     # visibility: "system"  = AI-extracted, visible to all graph members;
     #             "private" = only visible to created_by user;
     #             "shared"  = visible to members listed in shared_with (all if empty)
+    # Topic nodes set graph_id: nil and use organization_id for scoping.
     graph_id: nil,
+    organization_id: nil,
     visibility: "system",
     # Structural node type — "claim" (default), "synthesis", or "concept".
     # Synthesis nodes aggregate near-duplicate cross-graph claims; their
@@ -96,7 +98,11 @@ defmodule Xwa.Graph.Node do
     ilv_confidence: nil,
     # True when the claim scores well overall (mean SFM > 0) but has a significant
     # negative outlier on one axis — a potential mixed-signal / gaming pattern.
-    gaming_flag: false
+    gaming_flag: false,
+    # Theme assigned by assign_claim_themes (directly on claim nodes)
+    theme: nil,
+    # Confidence (0.0–1.0) that this claim fits its assigned theme; nil = not yet classified
+    theme_confidence: nil
   ]
 
   @type t :: %__MODULE__{
@@ -123,9 +129,12 @@ defmodule Xwa.Graph.Node do
           shared_with: [String.t()],
           notes: String.t() | nil,
           graph_id: String.t() | nil,
+          organization_id: String.t() | nil,
           visibility: String.t(),
           node_type: String.t(),
-          constituents: [map()]
+          constituents: [map()],
+          theme: String.t() | nil,
+          theme_confidence: float() | nil
         }
 
   @doc """
@@ -161,6 +170,7 @@ defmodule Xwa.Graph.Node do
       shared_with: Map.get(attrs, :shared_with, []),
       notes: Map.get(attrs, :notes),
       graph_id: Map.get(attrs, :graph_id),
+      organization_id: Map.get(attrs, :organization_id),
       visibility: Map.get(attrs, :visibility, "system"),
       node_type: Map.get(attrs, :node_type, "claim"),
       constituents: Map.get(attrs, :constituents, [])
@@ -258,13 +268,16 @@ defmodule Xwa.Graph.Node do
       shared_with: props["shared_with"] || [],
       notes: props["notes"],
       graph_id: props["graph_id"],
+      organization_id: props["organization_id"],
       visibility: Map.get(props, "visibility", "system"),
       node_type: props["node_type"] || "claim",
       constituents: zip_constituents(props["constituent_node_ids"], props["constituent_graph_ids"]),
       ilv_score: props["ilv_score"],
       ilv_fingerprint: atomize_ilv_fp(props["ilv_fingerprint"]),
       ilv_confidence: props["ilv_confidence"],
-      gaming_flag: props["gaming_flag"] || false
+      gaming_flag: props["gaming_flag"] || false,
+      theme: props["theme"],
+      theme_confidence: props["theme_confidence"]
     }
   end
 
@@ -293,8 +306,8 @@ defmodule Xwa.Graph.Node do
     |> require(:content, node.content)
     |> require(:summary, node.summary)
     |> then(fn errors ->
-      # Synthesis nodes have no source document — they aggregate cross-graph claims
-      if node.node_type == "synthesis" do
+      # Synthesis and topic nodes have no source document
+      if node.node_type in ["synthesis", "topic"] do
         errors
       else
         require(errors, :source_document_id, node.source_document_id)

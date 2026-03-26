@@ -121,6 +121,7 @@ const SigmaGraph = {
     this._hoveredEdges = new Set()     // edges of hover target
     this._selectedNode = null
     this._trailNodes = new Set()       // previous exploration centers (purple)
+    this._trailDepths = new Map()      // id → depth (0 = most recent trail node)
     this._maxDegree = 1
     this._draggedNode = null           // node currently being dragged
     this._isDragging = false           // true once drag threshold exceeded
@@ -138,6 +139,17 @@ const SigmaGraph = {
     this._edgeHighlightedNodes = new Set() // endpoints of _selectedEdge
     this._lastCenterId = null          // saved for re-render on AD expand
     this._lastHoodSet = null           // saved for re-render on AD expand
+    this._topicViewMode = false        // true when showing topic super-graph
+    this._topicNodesData = []          // topic node data from server
+    this._topicEdgesData = []          // topic-topic edge data from server
+    this._belongsToEdgesData = []      // claim→topic edge data from server
+    this._mainGraphData = null         // cached data from last graph_loaded (for exit topic view)
+    this._topicThemeMap = {}           // topic_id → theme name
+    this._claimThemeMap = {}           // claim_id → theme name
+    this._themeStats = {}              // theme name → {topicCount, claimCount}
+    this._activeThemeFilter = null     // theme name currently filtering the claim graph
+    this._themedNodes = new Set()      // node IDs in the active theme (empty = no filter)
+    this._isolatedHighlight = false    // when true, dim everything except degree-0 nodes
 
     // Track cursor position for tooltip anchoring.
     this._onMouseMove = (e) => {
@@ -177,6 +189,9 @@ const SigmaGraph = {
     this.el.appendChild(this._container)
 
     this.handleEvent("graph_loaded", (data) => {
+      this._mainGraphData = data
+      this._topicViewMode = false
+      this._updateTopicToggle()
       this._destroySigma()
       this._layoutDone = false
       this._skipLayout = false
@@ -187,6 +202,7 @@ const SigmaGraph = {
       this._selectedEdge = null
       this._edgeHighlightedNodes = new Set()
       this._minDegree = data.min_degree || 1
+      this._importanceThreshold = data.min_importance ?? 0
       this._currentLayer = data.layer  || "all"
       this._currentType  = data.type   || "all"
       this._inOverlay = false
@@ -269,6 +285,24 @@ const SigmaGraph = {
       this._updateStats && this._updateStats()
     })
 
+    this.handleEvent("importance_threshold_changed", ({min_importance}) => {
+      this._importanceThreshold = min_importance
+      this._applyDegreeFilter()
+      this.sigma && this.sigma.refresh()
+      this._updateStats && this._updateStats()
+    })
+
+    this.handleEvent("topic_data", (data) => {
+      this._topicNodesData = data.topic_nodes || []
+      this._topicEdgesData = data.topic_edges || []
+      this._belongsToEdgesData = data.belongs_to_edges || []
+      this._buildThemeIndex()
+    })
+
+    this.el.addEventListener("toggle-topic-view", () => this._toggleTopicView())
+    this.el.addEventListener("clear-theme-filter", () => this._clearThemeFilter())
+    this.el.addEventListener("toggle-isolated-highlight", () => this._toggleIsolatedHighlight())
+
     // Capture graph_id from the DOM attribute (set at mount time, stable across reloads).
     this._graphId = this.el.dataset.graphId || null
 
@@ -314,6 +348,7 @@ const SigmaGraph = {
     this._hoveredEdges = new Set()
     this._selectedNode = null
     this._trailNodes = new Set()
+    this._trailDepths = new Map()
     this._maxDegree = 1
     this._draggedNode = null
     this._isDragging = false
@@ -359,6 +394,7 @@ const SigmaGraph = {
         this._exploredNodes = []
         this._selectedNode = null
         this._trailNodes = new Set()
+        this._trailDepths = new Map()
         this._overlayHidden = new Set()
         this._overlayHiddenEdges = new Set()
         this._dimmedNodes = new Set()
@@ -384,6 +420,7 @@ const SigmaGraph = {
     this._dimmedNodes = new Set()
     this._dimmedEdges = new Set()
     this._trailNodes = new Set()
+    this._trailDepths = new Map()
 
     this.graph.forEachNode((id) => {
       if (!hoodSet.has(id) && !this._exploredNodes.includes(id)) {
@@ -398,19 +435,27 @@ const SigmaGraph = {
       }
     })
 
-    // Mark trail nodes (previous centers) — purple in the reducer
-    this._exploredNodes.forEach(id => {
-      if (id !== centerId) this._trailNodes.add(id)
+    // Mark trail nodes with depth (0 = most recent, increases going back)
+    // _exploredNodes is ordered oldest→newest; centerId is last
+    const trail = this._exploredNodes.filter(id => id !== centerId)
+    trail.forEach((id, i) => {
+      this._trailNodes.add(id)
+      this._trailDepths.set(id, trail.length - 1 - i)  // most recent = 0
     })
 
-    // Lay out the neighborhood concentrically around the center node
-    this._concentricLayout(hoodSet, centerId)
+    // Lay out the neighborhood with FA2 on a subgraph
+    this._neighbourhoodLayout(hoodSet, centerId)
 
     this._renderExploredLabels()
     this.sigma.refresh()
     this._updateStats()
     this._renderArcDiagram(centerId, hoodSet)
-    setTimeout(() => this._fitToNodes(hoodSet), 50)
+    setTimeout(() => {
+      this._fitToNodes(hoodSet)
+      this._removeOverlaps()
+      this.sigma.refresh()
+      this._fitToNodes(hoodSet)
+    }, 50)
   },
 
   // Vertical arc diagram rendered into #arc-diagram in the sidebar.
@@ -716,7 +761,9 @@ const SigmaGraph = {
     }
     this._selectedNode = os.centerNodeId
     this._exploredNodes = (os.exploredNodeIds || []).filter(id => this.graph.hasNode(id))
-    this._trailNodes = new Set(this._exploredNodes.slice(0, -1))
+    const restoredTrail = this._exploredNodes.slice(0, -1)
+    this._trailNodes = new Set(restoredTrail)
+    this._trailDepths = new Map(restoredTrail.map((id, i) => [id, restoredTrail.length - 1 - i]))
     this._inOverlay = true
     this._overlayHidden = new Set()
     this._overlayHiddenEdges = new Set()
@@ -776,13 +823,31 @@ const SigmaGraph = {
         this._hiddenNodes.add(id)
       }
     })
-    this.graph.forEachEdge((id, _attrs, source, target) => {
+    const minImportance = this._importanceThreshold ?? 0
+    this.graph.forEachEdge((id, attrs, source, target) => {
       if (this._hiddenNodes.has(source) || this._hiddenNodes.has(target)) {
+        this._hiddenEdges.add(id)
+      } else if ((attrs.importance ?? 0.5) < minImportance) {
         this._hiddenEdges.add(id)
       }
     })
+    // Theme filter: populate _themedNodes (used by nodeReducer/edgeReducer to dim non-themed nodes)
+    this._themedNodes = new Set()
+    if (this._activeThemeFilter) {
+      const theme = this._activeThemeFilter
+      this.graph.forEachNode((id, attrs) => {
+        if (this._hiddenNodes.has(id)) return
+        if (attrs.node_type !== "claim") return
+        const inTheme = theme === "__unclassified__"
+          ? (!this._claimThemeMap[id])
+          : this._claimThemeMap[id] === theme
+        if (inTheme) this._themedNodes.add(id)
+      })
+    }
+
     // Color nodes based on visible connectivity; mark isolated for ring placement.
     // Sphere nodes change color only (no type switch); dark-red tints the sphere texture.
+    let isolatedCount = 0
     this.graph.forEachNode((id) => {
       if (this._hiddenNodes.has(id)) return
       const hasVisibleEdge = this.graph.someEdge(id, (eid) => !this._hiddenEdges.has(eid))
@@ -793,7 +858,9 @@ const SigmaGraph = {
           ? "#dc2626"  // dark red — tints the sphere texture red
           : confidenceColor(this.graph.getNodeAttribute(id, "confidence") ?? 1.0, this._confMin, this._confMax)
       )
+      if (isolated) isolatedCount++
     })
+    this._updateIsolatedBadge(isolatedCount)
   },
 
   // Place neighborhood nodes in concentric rings around centerId.
@@ -847,7 +914,9 @@ const SigmaGraph = {
     const spanY = maxY - minY || 0.001
     // Camera ratio 1 shows a normalized span of 1.0. Scale proportionally,
     // adding 25% padding (multiply by 1.25).
-    const ratio = Math.max(spanX, spanY) * 1.25
+    // 1.25 padding; clamp so we never zoom in past ratio 0.15 (avoids giant-node effect
+    // when neighbourhood nodes are tightly clustered in a small graph-space region).
+    const ratio = Math.max(0.25, Math.max(spanX, spanY) * 1.25)
     this.sigma.getCamera().setState({x: cx, y: cy, ratio, angle: 0})
   },
 
@@ -1396,7 +1465,7 @@ const SigmaGraph = {
 
     const nodes = []
     this.graph.forEachNode((id, attrs) => {
-      if (this._hiddenNodes.has(id)) return  // skip degree-filtered nodes
+      if (this._hiddenNodes.has(id) || this._overlayHidden.has(id)) return  // skip hidden nodes
       // +5 px gap so adjacent nodes have a comfortable visual margin
       nodes.push({ id, x: attrs.x, y: attrs.y, r: ((attrs._size || 8) + 5) * graphUnitsPerPx })
     })
@@ -1426,6 +1495,43 @@ const SigmaGraph = {
     nodes.forEach(({ id, x, y }) => {
       this.graph.setNodeAttribute(id, "x", x)
       this.graph.setNodeAttribute(id, "y", y)
+    })
+  },
+
+  // Concentric ring layout for neighbourhood drill-down.
+  // Ring 0: center node. Ring 1: direct neighbours. Ring 2: remaining hood nodes.
+  // Deterministic — no FA2, no gravity, guaranteed no overlap.
+  _neighbourhoodLayout(hoodSet, centerId) {
+    const cx = this.graph.getNodeAttribute(centerId, "x") || 0
+    const cy = this.graph.getNodeAttribute(centerId, "y") || 0
+
+    // Partition hood into rings
+    const ring1 = []
+    this.graph.forEachNeighbor(centerId, (id) => {
+      if (hoodSet.has(id)) ring1.push(id)
+    })
+    const ring1Set = new Set(ring1)
+    const ring2 = [...hoodSet].filter(id => id !== centerId && !ring1Set.has(id))
+
+    const r1 = Math.max(350, ring1.length * 70)
+    const r2 = r1 + Math.max(300, ring2.length * 55)
+
+    // Center
+    this.graph.setNodeAttribute(centerId, "x", cx)
+    this.graph.setNodeAttribute(centerId, "y", cy)
+
+    // Ring 1 — direct neighbours
+    ring1.forEach((id, i) => {
+      const angle = (2 * Math.PI * i) / ring1.length - Math.PI / 2
+      this.graph.setNodeAttribute(id, "x", cx + r1 * Math.cos(angle))
+      this.graph.setNodeAttribute(id, "y", cy + r1 * Math.sin(angle))
+    })
+
+    // Ring 2 — indirect neighbours
+    ring2.forEach((id, i) => {
+      const angle = (2 * Math.PI * i) / ring2.length - Math.PI / 2
+      this.graph.setNodeAttribute(id, "x", cx + r2 * Math.cos(angle))
+      this.graph.setNodeAttribute(id, "y", cy + r2 * Math.sin(angle))
     })
   },
 
@@ -1636,6 +1742,202 @@ const SigmaGraph = {
     document.addEventListener("mouseup", this._onBoxUp)
   },
 
+  // ---------------------------------------------------------------------------
+  // Topic view
+  // ---------------------------------------------------------------------------
+
+  _toggleTopicView() {
+    const panel = document.getElementById("cy-theme-panel")
+    if (!panel) return
+    if (panel.style.display === "none" || panel.style.display === "") {
+      this._openThemePanel()
+    } else {
+      this._closeThemePanel()
+    }
+  },
+
+  _openThemePanel() {
+    const panel = document.getElementById("cy-theme-panel")
+    if (!panel) { console.warn("[Themes] panel element not found"); return }
+
+    const themes = Object.entries(this._themeStats)
+      .sort((a, b) => b[1].claimCount - a[1].claimCount)
+
+    if (themes.length === 0) {
+      panel.innerHTML = `<p style="font-size:12px;opacity:0.5;text-align:center;padding:12px">No themes loaded yet.</p>`
+      panel.style.display = "block"
+      this._updateTopicToggle()
+      return
+    }
+
+    const maxClaims = themes.length ? themes[0][1].claimCount : 1
+
+    // Count unclassified claims (no theme or theme = "unclassified")
+    const allNodes = this._mainGraphData?.nodes || []
+    const unclassifiedCount = allNodes.filter(({data: d}) =>
+      d.node_type === "claim" && (!d.theme || d.theme === "unclassified")
+    ).length
+    const activeUnclassified = this._activeThemeFilter === "__unclassified__"
+
+    panel.innerHTML = `
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+        <span style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;opacity:0.5">Themes</span>
+        <button id="cy-theme-panel-close" style="opacity:0.4;font-size:16px;line-height:1;cursor:pointer;background:none;border:none;padding:0">✕</button>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:3px">
+        ${themes.map(([theme, {claimCount}]) => {
+          const pct = Math.round((claimCount / maxClaims) * 100)
+          const active = this._activeThemeFilter === theme
+          return `<button class="cy-theme-item" data-theme="${escHtml(theme)}" style="
+            display:flex;align-items:center;gap:8px;width:100%;text-align:left;
+            padding:5px 8px;border-radius:6px;border:none;cursor:pointer;font-size:12px;
+            background:${active ? "rgba(16,185,129,0.15)" : "transparent"};
+            color:${active ? "#059669" : "inherit"};
+            font-weight:${active ? "600" : "400"};
+          ">
+            <div style="flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escHtml(theme)}</div>
+            <div style="display:flex;align-items:center;gap:5px;flex-shrink:0">
+              <div style="width:40px;height:3px;border-radius:2px;background:#e5e7eb;overflow:hidden">
+                <div style="width:${pct}%;height:100%;background:#10b981;border-radius:2px"></div>
+              </div>
+              <span style="font-size:10px;opacity:0.5;min-width:24px;text-align:right">${claimCount}</span>
+            </div>
+          </button>`
+        }).join("")}
+        ${unclassifiedCount > 0 ? `
+          <div style="margin-top:6px;border-top:1px solid rgba(255,255,255,0.08);padding-top:6px">
+            <button class="cy-theme-item" data-theme="__unclassified__" style="
+              display:flex;align-items:center;gap:8px;width:100%;text-align:left;
+              padding:5px 8px;border-radius:6px;border:none;cursor:pointer;font-size:12px;
+              background:${activeUnclassified ? "rgba(239,68,68,0.15)" : "transparent"};
+              color:${activeUnclassified ? "#ef4444" : "rgba(255,255,255,0.4)"};
+              font-weight:${activeUnclassified ? "600" : "400"};
+            ">
+              <div style="flex:1;min-width:0">Unclassified</div>
+              <span style="font-size:10px;min-width:24px;text-align:right">${unclassifiedCount}</span>
+            </button>
+          </div>` : ""}
+      </div>
+    `
+
+    panel.style.display = "block"
+
+    panel.querySelector("#cy-theme-panel-close")?.addEventListener("click", () => this._closeThemePanel())
+    panel.querySelectorAll(".cy-theme-item").forEach(btn => {
+      btn.addEventListener("click", () => {
+        const theme = btn.dataset.theme
+        if (this._activeThemeFilter === theme) {
+          this._activeThemeFilter = null
+        } else {
+          this._activeThemeFilter = theme
+        }
+        this._applyThemeFilter()
+        this._closeThemePanel()
+      })
+    })
+
+    this._updateTopicToggle()
+  },
+
+  _closeThemePanel() {
+    const panel = document.getElementById("cy-theme-panel")
+    if (panel) panel.style.display = "none"
+    this._updateTopicToggle()
+  },
+
+  // Builds a Sigma graph from topic nodes + topic-topic edges only.
+  _buildThemeIndex() {
+    // Primary: read theme directly from claim node attributes (set by assign_claim_themes)
+    this._claimThemeMap = {}
+    this._themeStats = {}
+
+    const nodes = this._mainGraphData?.nodes || []
+    nodes.forEach(({data: d}) => {
+      if (d.node_type !== "claim" || !d.theme || d.theme === "unclassified") return
+      this._claimThemeMap[d.id] = d.theme
+      if (!this._themeStats[d.theme]) this._themeStats[d.theme] = {claimCount: 0}
+      this._themeStats[d.theme].claimCount++
+    })
+
+    // Fallback: derive from topic belongs_to chain (legacy, for graphs not yet backfilled)
+    if (Object.keys(this._claimThemeMap).length === 0 && this._topicNodesData.length > 0) {
+      const topicThemeMap = {}
+      this._topicNodesData.forEach(({data: d}) => {
+        if (d.theme) topicThemeMap[d.id] = d.theme
+      })
+      this._belongsToEdgesData.forEach(({data: d}) => {
+        const theme = topicThemeMap[d.target]
+        if (!theme) return
+        this._claimThemeMap[d.source] = theme
+        if (!this._themeStats[theme]) this._themeStats[theme] = {claimCount: 0}
+        this._themeStats[theme].claimCount++
+      })
+    }
+  },
+
+  _applyThemeFilter() {
+    if (!this.graph) return
+    this._updateThemeFilterBadge()
+    this._applyDegreeFilter()
+    if (this.sigma) this.sigma.refresh()
+  },
+
+  _clearThemeFilter() {
+    this._activeThemeFilter = null
+    this._updateThemeFilterBadge()
+    this._applyDegreeFilter()
+    if (this.sigma) this.sigma.refresh()
+  },
+
+  _updateIsolatedBadge(count) {
+    const badge = document.getElementById("cy-isolated-badge")
+    if (!badge) return
+    if (count > 0) {
+      badge.textContent = `● ${count} isolated`
+      badge.style.display = "inline-flex"
+      badge.classList.toggle("ring-1", this._isolatedHighlight)
+      badge.classList.toggle("ring-red-400", this._isolatedHighlight)
+    } else {
+      badge.style.display = "none"
+    }
+  },
+
+  _toggleIsolatedHighlight() {
+    this._isolatedHighlight = !this._isolatedHighlight
+    const badge = document.getElementById("cy-isolated-badge")
+    if (badge) {
+      badge.classList.toggle("ring-1", this._isolatedHighlight)
+      badge.classList.toggle("ring-red-400", this._isolatedHighlight)
+    }
+    if (this.sigma) this.sigma.refresh()
+  },
+
+  _updateThemeFilterBadge() {
+    const badge = document.getElementById("cy-theme-filter-badge")
+    if (!badge) return
+    if (this._activeThemeFilter) {
+      const label = this._activeThemeFilter === "__unclassified__" ? "Unclassified" : this._activeThemeFilter
+      badge.textContent = label + " ×"
+      badge.style.display = "inline-flex"
+    } else {
+      badge.style.display = "none"
+    }
+  },
+
+  _updateTopicToggle() {
+    const btn = document.getElementById("cy-topic-toggle")
+    if (!btn) return
+    const panel = document.getElementById("cy-theme-panel")
+    const open = panel && panel.style.display !== "none" && panel.style.display !== ""
+    if (open) {
+      btn.classList.add("bg-emerald-500/20", "text-emerald-600", "border-emerald-300")
+      btn.classList.remove("text-base-content/50")
+    } else {
+      btn.classList.remove("bg-emerald-500/20", "text-emerald-600", "border-emerald-300")
+      btn.classList.add("text-base-content/50")
+    }
+  },
+
   _onLayoutDone(skipPlacement = false) {
     this._layoutDone = true
     this._applyDegreeFilter()
@@ -1788,10 +2090,29 @@ const SigmaGraph = {
     // Overlay visibility (neighborhood mode)
     if (this._overlayHidden.has(id)) { result.hidden = true; return result }
 
-    // Focus dimming
+    // Focus dimming (neighbourhood mode)
     if (this._dimmedNodes.has(id)) {
-      result.color = colors.neutral
-      result.size = Math.max(result.size * 0.5, 3)
+      result.hidden = true
+      return result
+    }
+
+    // Isolated highlight: dim everything except degree-0 nodes
+    if (this._isolatedHighlight) {
+      if (!attrs._isolated) {
+        result.color = "#1f2937"
+        result.size = 3
+        result.label = undefined
+        result.zIndex = 0
+        return result
+      }
+    }
+
+    // Theme filter: dim nodes not in the active theme
+    if (this._themedNodes.size > 0 && !this._themedNodes.has(id)) {
+      result.color = "#1f2937"
+      result.size = 3
+      result.label = undefined
+      result.zIndex = 0
       return result
     }
 
@@ -1805,16 +2126,20 @@ const SigmaGraph = {
       return result
     }
 
-    // Trail nodes (previous exploration centers) — violet
+    // Trail nodes (previous exploration centers) — fade by depth
     if (this._trailNodes.has(id)) {
-      result.color = "#8b5cf6"
-      result.size = result.size + 3
-      result.zIndex = 20
+      const depth = this._trailDepths.get(id) ?? 0
+      // depth 0 = most recent (bright violet), increases going back (darker, smaller)
+      const colors = ["#9ca3af", "#6b7280", "#4b5563", "#374151", "#1f2937"]
+      result.color = colors[Math.min(depth, colors.length - 1)]
+      result.size = Math.max(5, result.size + 3 - depth * 1.5)
+      result.zIndex = Math.max(5, 20 - depth * 4)
       return result
     }
 
-    // Selected node — keep confidence color, just enlarge
+    // Selected node — white "you are here" marker
     if (id === this._selectedNode) {
+      result.color = "#ffffff"
       result.size = result.size + 6
       result.zIndex = 30
       return result
@@ -1841,7 +2166,7 @@ const SigmaGraph = {
   _edgeReducer(id, attrs, colors) {
     const confidence = attrs.confidence ?? 0.5
     // Opacity: low-confidence edges fade to 25%, high-confidence stay fully visible.
-    const alpha = Math.round((0.25 + confidence * 0.75) * 255).toString(16).padStart(2, "0")
+    const alpha = Math.round((0.1 + confidence * 0.45) * 255).toString(16).padStart(2, "0")
     const certaintyColor = { solid: "#5a9e6f", dashed: "#a07830", dotted: "#f87171" }[attrs.certainty] ?? "#6b7280"
     const result = {
       color: certaintyColor + alpha,
@@ -1866,12 +2191,25 @@ const SigmaGraph = {
     // Overlay visibility
     if (this._overlayHiddenEdges.has(id)) { result.hidden = true; return result }
 
-    // Focus dimming
+    // Focus dimming — hide edges that connect to non-neighbourhood nodes
     if (this._dimmedEdges.has(id)) {
-      result.color = certaintyColor + "30"
-      result.size = 0.5
-      result.zIndex = 0
+      result.hidden = true
       return result
+    }
+
+    // Isolated highlight: hide all edges (isolated nodes have none)
+    if (this._isolatedHighlight) { result.hidden = true; return result }
+
+    // Theme filter: hide edges with no themed endpoint; fade cross-theme edges
+    if (this._themedNodes.size > 0) {
+      const srcThemed = this._themedNodes.has(this.graph.source(id))
+      const tgtThemed = this._themedNodes.has(this.graph.target(id))
+      if (!srcThemed && !tgtThemed) { result.hidden = true; return result }
+      if (!srcThemed || !tgtThemed) {
+        result.color = "#374151" + "60"
+        result.size = 0.5
+        return result
+      }
     }
 
     // Hover highlight
@@ -2042,11 +2380,28 @@ const DegreeSlider = {
   }
 }
 
+// ImportanceSlider hook — filters edges below importance threshold client-side.
+// ---------------------------------------------------------------------------
+const ImportanceSlider = {
+  mounted() {
+    const label = document.getElementById("cy-importance-label")
+    const input = this.el
+
+    input.addEventListener("input", () => {
+      if (label) label.textContent = parseFloat(input.value).toFixed(2)
+    })
+
+    input.addEventListener("change", () => {
+      this.pushEvent("filter_min_importance", {min_importance: input.value})
+    })
+  }
+}
+
 const csrfToken = document.querySelector("meta[name='csrf-token']").getAttribute("content")
 const liveSocket = new LiveSocket("/live", Socket, {
   longPollFallbackMs: 2500,
   params: {_csrf_token: csrfToken},
-  hooks: {...colocatedHooks, SigmaGraph, CodeEditorHook, MonacoFix, CopyToClipboard, DegreeSlider},
+  hooks: {...colocatedHooks, SigmaGraph, CodeEditorHook, MonacoFix, CopyToClipboard, DegreeSlider, ImportanceSlider},
 })
 
 // Show progress bar on live navigation and form submits
