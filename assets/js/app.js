@@ -133,6 +133,8 @@ const SigmaGraph = {
     this._pendingViewId = null         // save ID being loaded — positions applied in graph_loaded handler
     this._skipLayout = false           // set when saved-view positions are pre-loaded; skips FA2/auto-save
     this._pendingOverlayRestore = null // overlay state to restore after layout (from a saved view)
+    this._explodedSynthesis = null     // ID of currently exploded synthesis node
+    this._explodedConstituents = new Set() // constituent node IDs in the explosion
     this._mouseX = 0                   // cursor position relative to this.el, updated on mousemove
     this._mouseY = 0
     this._selectedEdge = null          // currently clicked edge
@@ -1095,6 +1097,21 @@ const SigmaGraph = {
     this.sigma.on("clickNode", ({node}) => {
       if (this._didDrag) { this._didDrag = false; return }  // consumed: drag just ended
       this._dismissEdgeSelection()
+
+      // Synthesis node: explode/collapse in place
+      const nodeType = this.graph.getNodeAttribute(node, "node_type")
+      if (nodeType === "synthesis") {
+        if (this._explodedSynthesis === node) {
+          this._collapseExplosion()
+        } else {
+          this._explodeSynthesis(node)
+        }
+        return
+      }
+
+      // Collapse any open explosion when clicking another node
+      if (this._explodedSynthesis) this._collapseExplosion()
+
       const currentCenter = this._exploredNodes[this._exploredNodes.length - 1]
       const prevIdx = this._exploredNodes.indexOf(node)
       if (prevIdx !== -1 && node !== currentCenter) {
@@ -1106,6 +1123,7 @@ const SigmaGraph = {
 
     this.sigma.on("clickStage", () => {
       if (this._selectedEdge) { this._dismissEdgeSelection(); return }
+      if (this._explodedSynthesis) { this._collapseExplosion(); return }
       // Manual fallback: check if click landed near an edge (Sigma's built-in
       // edge picking can miss thin edges in some versions/programs)
       const edgeId = this._findEdgeAtPoint(this._mouseX, this._mouseY)
@@ -1496,6 +1514,49 @@ const SigmaGraph = {
       this.graph.setNodeAttribute(id, "x", x)
       this.graph.setNodeAttribute(id, "y", y)
     })
+  },
+
+  // Explode a synthesis node in place: bloom its constituents in a tight ring,
+  // dim everything else. Click the synthesis node again or the stage to collapse.
+  _explodeSynthesis(nodeId) {
+    // Find constituent nodes via contributes_to edges
+    const constituentIds = []
+    this.graph.forEachEdge(nodeId, (eid, eattrs, source, target) => {
+      if (eattrs.type === "contributes_to") {
+        constituentIds.push(source === nodeId ? target : source)
+      }
+    })
+
+    if (constituentIds.length === 0) {
+      // No constituents in graph — fall through to normal selection
+      this.pushEvent("node_selected", {id: nodeId})
+      return
+    }
+
+    this._explodedSynthesis = nodeId
+    this._explodedConstituents = new Set(constituentIds)
+    this._selectedNode = nodeId
+
+    // Bloom: place constituents in a tight ring around the synthesis node
+    const cx = this.graph.getNodeAttribute(nodeId, "x") || 0
+    const cy = this.graph.getNodeAttribute(nodeId, "y") || 0
+    const r = Math.max(200, constituentIds.length * 50)
+    constituentIds.forEach((id, i) => {
+      const angle = (2 * Math.PI * i) / constituentIds.length - Math.PI / 2
+      this.graph.setNodeAttribute(id, "x", cx + r * Math.cos(angle))
+      this.graph.setNodeAttribute(id, "y", cy + r * Math.sin(angle))
+    })
+
+    // Notify server for detail panel
+    this.pushEvent("node_selected", {id: nodeId})
+
+    this.sigma.refresh()
+  },
+
+  _collapseExplosion() {
+    this._explodedSynthesis = null
+    this._explodedConstituents = new Set()
+    this.sigma.refresh()
   },
 
   // Concentric ring layout for neighbourhood drill-down.
@@ -2096,6 +2157,18 @@ const SigmaGraph = {
       return result
     }
 
+    // Synthesis explosion: dim everything except the synthesis node and its constituents
+    if (this._explodedSynthesis) {
+      const inExplosion = id === this._explodedSynthesis || this._explodedConstituents.has(id)
+      if (!inExplosion) {
+        result.color = "#1f2937"
+        result.size = 3
+        result.label = undefined
+        result.zIndex = 0
+        return result
+      }
+    }
+
     // Isolated highlight: dim everything except degree-0 nodes
     if (this._isolatedHighlight) {
       if (!attrs._isolated) {
@@ -2195,6 +2268,15 @@ const SigmaGraph = {
     if (this._dimmedEdges.has(id)) {
       result.hidden = true
       return result
+    }
+
+    // Synthesis explosion: show only contributes_to edges; hide everything else
+    if (this._explodedSynthesis) {
+      const src = this.graph.source(id)
+      const tgt = this.graph.target(id)
+      const isExplosionEdge = attrs.type === "contributes_to" &&
+        (src === this._explodedSynthesis || tgt === this._explodedSynthesis)
+      if (!isExplosionEdge) { result.hidden = true; return result }
     }
 
     // Isolated highlight: hide all edges (isolated nodes have none)

@@ -1,0 +1,5 @@
+fastapi>=0.100.0
+uvicorn[standard]>=0.20.0
+sentence-transformers>=3.0.0
+# PyTorch: install separately with CUDA support (see README / install.sh)
+# pip install torch --index-url https://download.pytorch.org/whl/cu118 --user

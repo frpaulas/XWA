@@ -32,8 +32,11 @@ defmodule Xwa.Ingestion.IngestionWorker do
   alias Xwa.Documents
   alias Xwa.Graphs
   alias Xwa.Graph.{Nodes, Edges, Topics, VectorMath}
-  alias Xwa.Ingestion.{ClaimExtractor, DocumentSegmenter, EdgeExtractor, ExtractionRuns, TextExtractor, ThemeClassifier, TopicExtractor, VoyageEmbedder}
+  alias Xwa.Ingestion.{ClaimExtractor, DocumentSegmenter, EdgeExtractor, ExtractionRuns, NliGate, TextExtractor, ThemeClassifier, TopicExtractor, VoyageEmbedder}
 
+  # Cosine pre-filter pool size — fetched before NLI gate
+  @cosine_pool_size 50
+  # Final neighbourhood size passed to Claude after NLI gate (or cosine fallback)
   @neighbourhood_size 20
   @prompt_version "v1"
 
@@ -549,6 +552,7 @@ defmodule Xwa.Ingestion.IngestionWorker do
       {:ok, embedding_pairs} ->
         norm_new = VectorMath.normalize(node_embedding)
 
+        # Fetch a larger cosine pool, then narrow via NLI gate
         top_ids =
           embedding_pairs
           |> Enum.reject(fn {id, _} -> id == node.id end)
@@ -557,7 +561,7 @@ defmodule Xwa.Ingestion.IngestionWorker do
             {id, score}
           end)
           |> Enum.sort_by(fn {_, score} -> score end, :desc)
-          |> Enum.take(@neighbourhood_size)
+          |> Enum.take(@cosine_pool_size)
           |> Enum.map(fn {id, _} -> id end)
           |> MapSet.new()
 
@@ -576,9 +580,14 @@ defmodule Xwa.Ingestion.IngestionWorker do
             end
           end
 
-        source
-        |> Enum.reject(&(&1.id == node.id))
-        |> Enum.filter(&MapSet.member?(top_ids, &1.id))
+        cosine_pool =
+          source
+          |> Enum.reject(&(&1.id == node.id))
+          |> Enum.filter(&MapSet.member?(top_ids, &1.id))
+
+        # NLI gate: drop neutral pairs, keep top @neighbourhood_size
+        claim_text = node.summary || node.content || ""
+        NliGate.filter(claim_text, cosine_pool, keep: @neighbourhood_size)
 
       _ ->
         fetch_neighbourhood_unranked(node, doc, graph_id)

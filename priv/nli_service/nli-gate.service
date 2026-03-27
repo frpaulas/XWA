@@ -1,0 +1,15 @@
+[Unit]
+Description=XWA NLI Gate Service
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/mnt/projects/E/Elixir/projects/xwa/priv/nli_service
+ExecStart=/usr/bin/python3 /mnt/projects/E/Elixir/projects/xwa/priv/nli_service/nli_service.py
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target
